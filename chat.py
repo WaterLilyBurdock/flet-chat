@@ -1,37 +1,63 @@
 import os
 import time
+import random
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, date
 
 import flet as ft
 
 # ============================================================
 # НАСТРОЙКА ДЛЯ RENDER (headless-среда)
 # ============================================================
-# Принудительно включаем веб-сервер, чтобы Flet не пытался
-# открыть GUI-окно (на Render дисплея нет)
 os.environ.setdefault("FLET_FORCE_WEB_SERVER", "true")
 
 # ============================================================
-# ГЛОБАЛЬНОЕ СОСТОЯНИЕ (живёт в серверном процессе, одно на всех)
+# ГЛОБАЛЬНОЕ СОСТОЯНИЕ
 # ============================================================
-HISTORY: list[dict] = []          # Задание 4: история сообщений
+HISTORY: list[dict] = []
 MAX_HISTORY = 50
 
-# Задание 3: словарь участников {имя: session_id}
-PARTICIPANTS: dict[str, str] = {}
+PARTICIPANTS: dict[str, str] = {}       # имя -> session_id
+SESSION_NAMES: dict[str, str] = {}      # session_id -> имя
 
-# Задание 1: палитра цветов для ников
 PALETTE = [
     ft.Colors.BLUE_400, ft.Colors.ORANGE_400, ft.Colors.PURPLE_400,
     ft.Colors.TEAL_400, ft.Colors.PINK_400, ft.Colors.AMBER_400,
-    ft.Colors.CYAN_400, ft.Colors.LIME_400,
+    ft.Colors.CYAN_400, ft.Colors.LIME_400, ft.Colors.INDIGO_400,
+    ft.Colors.DEEP_ORANGE_400,
 ]
+
+BOT_NAME = "Бот"
+BOT_COMMANDS = {
+    "/help": "Показать список команд",
+    "/users": "Кто сейчас в чате",
+    "/time": "Текущее время сервера",
+    "/roll": "Случайное число 1–100",
+    "/me <действие>": "Эмодзи-действие, например /me машет рукой",
+    "/clear": "Очистить ленту у себя",
+}
+
+MAX_MSG_LEN = 500
 
 
 def get_user_color(name: str) -> str:
-    """Детерминированный цвет по имени (Задание 1)."""
     return PALETTE[sum(ord(c) for c in name) % len(PALETTE)]
+
+
+def get_initials(name: str) -> str:
+    parts = name.strip().split()
+    if len(parts) >= 2:
+        return (parts[0][0] + parts[1][0]).upper()
+    return name[:2].upper() if name else "?"
+
+
+def format_date_label(d: date) -> str:
+    today = date.today()
+    if d == today:
+        return "Сегодня"
+    if (today - d).days == 1:
+        return "Вчера"
+    return d.strftime("%d.%m.%Y")
 
 
 # ============================================================
@@ -42,8 +68,9 @@ class Message:
     user: str
     text: str
     timestamp: str
-    type: str = "message"                 # "message" | "typing"
-    target_session_id: str | None = None  # Задание 3
+    type: str = "message"
+    target_session_id: str | None = None
+    date: str = ""   # ISO-дата для разделителей
 
 
 # ============================================================
@@ -53,106 +80,355 @@ def main(page: ft.Page) -> None:
     page.title = "Flet Chat"
     page.padding = 0
     page.theme_mode = ft.ThemeMode.DARK
+    page.bgcolor = ft.Colors.GREY_950
 
     user_name: list[str | None] = [None]
     my_session_id = page.session.id
+    last_rendered_date: list[str] = [""]
+    last_author: list[str] = [""]
+    unread_count: list[int] = [0]
+    original_title = "Flet Chat"
 
-    # ---------- UI ----------
-    chat_list = ft.ListView(expand=True, spacing=10, padding=20, auto_scroll=True)
-
-    message_input = ft.TextField(
-        hint_text="Введите сообщение…", expand=True,
-        border_color=ft.Colors.BLUE_400, autofocus=True,
+    # ---------- Шапка ----------
+    online_badge = ft.Container(
+        content=ft.Row([
+            ft.Container(width=8, height=8, border_radius=4,
+                         bgcolor=ft.Colors.GREEN_400),
+            ft.Text("0 онлайн", size=12, color=ft.Colors.GREY_300),
+        ], spacing=6, tight=True),
+        padding=ft.padding.symmetric(horizontal=10, vertical=4),
+        border_radius=12,
+        bgcolor=ft.Colors.with_opacity(0.15, ft.Colors.GREEN_400),
     )
 
-    typing_status = ft.Text("", size=12, color=ft.Colors.GREY_500, italic=True)
+    logout_btn = ft.IconButton(
+        ft.Icons.LOGOUT, icon_color=ft.Colors.GREY_400,
+        icon_size=20, tooltip="Выйти",
+        visible=False,
+    )
 
-    # Задание 3: выбор получателя
+    header = ft.Container(
+        content=ft.Row([
+            ft.Container(
+                content=ft.Icon(ft.Icons.CHAT_BUBBLE_ROUNDED,
+                                color=ft.Colors.WHITE, size=22),
+                width=40, height=40, border_radius=12,
+                bgcolor=ft.Colors.GREEN_600,
+                alignment=ft.Alignment.CENTER,
+            ),
+            ft.Column([
+                ft.Text("Flet Chat", size=18, weight=ft.FontWeight.BOLD,
+                        color=ft.Colors.WHITE),
+                ft.Text("Общайтесь в реальном времени", size=11,
+                        color=ft.Colors.GREY_400),
+            ], spacing=0, expand=True),
+            online_badge,
+            logout_btn,
+        ], spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        padding=ft.padding.symmetric(horizontal=16, vertical=12),
+        gradient=ft.LinearGradient(
+            begin=ft.Alignment.TOP_LEFT,
+            end=ft.Alignment.BOTTOM_RIGHT,
+            colors=[ft.Colors.GREY_900, ft.Colors.GREY_850],
+        ),
+        border=ft.border.only(bottom=ft.BorderSide(1, ft.Colors.GREY_800)),
+    )
+
+    # ---------- Лента ----------
+    chat_list = ft.ListView(
+        expand=True, spacing=6,
+        padding=ft.padding.symmetric(horizontal=16, vertical=16),
+        auto_scroll=True,
+    )
+
+    typing_status = ft.Container(
+        content=ft.Row([], spacing=6, tight=True),
+        padding=ft.padding.only(left=16, bottom=4),
+        visible=False,
+    )
+
+    # ---------- Поле ввода ----------
+    message_input = ft.TextField(
+        hint_text="Введите сообщение…",
+        expand=True,
+        border_color=ft.Colors.GREY_700,
+        focused_border_color=ft.Colors.GREEN_400,
+        bgcolor=ft.Colors.GREY_900,
+        border_radius=24,
+        content_padding=ft.padding.symmetric(horizontal=18, vertical=14),
+        multiline=True,
+        min_lines=1,
+        max_lines=4,
+        shift_enter=True,
+        autofocus=True,
+    )
+
+    char_counter = ft.Text("0/500", size=10, color=ft.Colors.GREY_600)
+
+    send_btn = ft.Container(
+        content=ft.Icon(ft.Icons.SEND_ROUNDED, color=ft.Colors.WHITE, size=20),
+        width=44, height=44, border_radius=22,
+        bgcolor=ft.Colors.GREEN_600,
+        alignment=ft.Alignment.CENTER,
+        on_click=lambda e: send_message(e),
+        ink=True,
+    )
+
     recipient_dropdown = ft.Dropdown(
-        width=160,
+        width=150,
         options=[ft.dropdown.Option("all", "Всем")],
         value="all",
-        text_size=14,
-        content_padding=8,
+        text_size=13,
+        bgcolor=ft.Colors.GREY_900,
+        border_color=ft.Colors.GREY_700,
+        border_radius=12,
+        content_padding=ft.padding.symmetric(horizontal=12, vertical=8),
     )
 
-    # ---------- Отрисовка сообщения ----------
-    def add_message_to_ui(msg: Message) -> None:
-        is_own = msg.user == user_name[0]
+    input_bar = ft.Container(
+        content=ft.Column([
+            ft.Row([
+                message_input,
+                send_btn,
+            ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.END),
+            ft.Row([
+                recipient_dropdown,
+                ft.Container(expand=True),
+                char_counter,
+            ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        ], spacing=6),
+        padding=ft.padding.symmetric(horizontal=16, vertical=10),
+        bgcolor=ft.Colors.GREY_900,
+        border=ft.border.only(top=ft.BorderSide(1, ft.Colors.GREY_800)),
+    )
 
-        # Задание 1: цвет ника
-        nick_color = (
-            get_user_color(msg.user)
-            if msg.user != "Система"
-            else ft.Colors.GREY_400
-        )
-
-        # Задание 3: пометка приватного сообщения
-        private_mark = ""
-        if msg.target_session_id:
-            target_name = next(
-                (n for n, sid in PARTICIPANTS.items()
-                 if sid == msg.target_session_id),
-                "?",
-            )
-            private_mark = f" [→ {target_name}]"
-
+    # ============================================================
+    # Отрисовка сообщения
+    # ============================================================
+    def add_date_separator(d_iso: str) -> None:
+        try:
+            d = date.fromisoformat(d_iso)
+        except ValueError:
+            d = date.today()
         chat_list.controls.append(
             ft.Container(
-                content=ft.Column([
-                    ft.Row([
-                        ft.Text(
-                            msg.user + private_mark,
-                            weight=ft.FontWeight.BOLD, size=12,
-                            color=nick_color,
-                        ),
-                        ft.Text(msg.timestamp, size=10, color=ft.Colors.GREY_500),
-                    ], spacing=8),
-                    ft.Text(msg.text, size=14, color=ft.Colors.WHITE_70),
-                ], spacing=2),
-                bgcolor=ft.Colors.GREEN_900 if is_own else ft.Colors.GREY_900,
-                padding=10,
-                border_radius=8,
-                width=page.width * 0.7 if page.width else 300,
-                alignment=(
-                    ft.Alignment.CENTER_RIGHT if is_own
-                    else ft.Alignment.CENTER_LEFT
-                ),
+                content=ft.Text(format_date_label(d), size=11,
+                                color=ft.Colors.GREY_400),
+                alignment=ft.Alignment.CENTER,
+                padding=ft.padding.symmetric(vertical=8),
             )
         )
 
-    # ---------- Приём сообщений ----------
+    def make_avatar(name: str, size: int = 36) -> ft.Container:
+        color = get_user_color(name) if name != "Система" else ft.Colors.GREY_500
+        if name == BOT_NAME:
+            color = ft.Colors.INDIGO_400
+        return ft.Container(
+            content=ft.Text(get_initials(name), size=size // 3,
+                            weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
+            width=size, height=size, border_radius=size // 2,
+            bgcolor=color, alignment=ft.Alignment.CENTER,
+        )
+
+    def add_message_to_ui(msg: Message) -> None:
+        is_own = msg.user == user_name[0]
+        is_bot = msg.user == BOT_NAME
+        is_system = msg.user == "Система"
+
+        # Разделитель дат
+        msg_date = msg.date or date.today().isoformat()
+        if msg_date != last_rendered_date[0]:
+            add_date_separator(msg_date)
+            last_rendered_date[0] = msg_date
+            last_author[0] = ""
+
+        # Системные сообщения — по центру, тонким шрифтом
+        if is_system:
+            chat_list.controls.append(
+                ft.Container(
+                    content=ft.Text(msg.text, size=11, italic=True,
+                                    color=ft.Colors.GREY_500),
+                    alignment=ft.Alignment.CENTER,
+                    padding=ft.padding.symmetric(vertical=4),
+                )
+            )
+            last_author[0] = "Система"
+            return
+
+        nick_color = (get_user_color(msg.user) if not is_bot
+                      else ft.Colors.INDIGO_400)
+
+        private_mark = ""
+        if msg.target_session_id:
+            target_name = SESSION_NAMES.get(msg.target_session_id, "?")
+            private_mark = f"  🔒 → {target_name}"
+
+        # Группировка: если тот же автор подряд — без шапки
+        show_header = last_author[0] != msg.user
+        last_author[0] = msg.user
+
+        bubble_children = []
+        if show_header:
+            bubble_children.append(
+                ft.Row([
+                    ft.Text(msg.user + private_mark,
+                            weight=ft.FontWeight.BOLD, size=12,
+                            color=nick_color),
+                    ft.Text(msg.timestamp, size=10, color=ft.Colors.GREY_500),
+                ], spacing=8, tight=True)
+            )
+        bubble_children.append(
+            ft.Text(msg.text, size=14, color=ft.Colors.WHITE,
+                    selectable=True)
+        )
+
+        bubble = ft.Container(
+            content=ft.Column(bubble_children, spacing=2, tight=True),
+            bgcolor=(ft.Colors.GREEN_800 if is_own
+                     else ft.Colors.GREY_800 if not is_bot
+                     else ft.Colors.INDIGO_900),
+            padding=ft.padding.symmetric(horizontal=14, vertical=10),
+            border_radius=ft.border_radius.only(
+                top_left=16, top_right=16,
+                bottom_left=4 if is_own else 16,
+                bottom_right=16 if is_own else 4,
+            ),
+            width=page.width * 0.72 if page.width else 320,
+            shadow=ft.BoxShadow(blur_radius=8, spread_radius=0,
+                                color=ft.Colors.with_opacity(0.2, ft.Colors.BLACK),
+                                offset=ft.Offset(0, 2)),
+        )
+
+        row = ft.Row(
+            [
+                ft.Container(expand=True),
+                bubble if is_own else ft.Container(),
+                ft.Container(),
+            ] if is_own else [
+                make_avatar(msg.user) if show_header else ft.Container(width=36),
+                bubble,
+                ft.Container(expand=True),
+            ],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.END,
+        )
+
+        chat_list.controls.append(row)
+
+    # ============================================================
+    # Приём сообщений
+    # ============================================================
     def on_message(msg_data: dict) -> None:
-        # Задание 2: обработка индикатора набора
+        # Индикатор «печатает…»
         if msg_data.get("type") == "typing":
-            typing_status.value = f"{msg_data['user']} печатает…"
+            if msg_data["user"] == user_name[0]:
+                return
+            typing_status.content = ft.Row([
+                make_avatar(msg_data["user"], size=20),
+                ft.Text(f"{msg_data['user']} печатает…",
+                        size=11, italic=True, color=ft.Colors.GREY_400),
+            ], spacing=6, tight=True)
+            typing_status.visible = True
             page.update()
             return
 
-        # Обычное сообщение — сбрасываем индикатор набора
-        typing_status.value = ""
+        # Сброс индикатора набора при обычном сообщении
+        typing_status.visible = False
 
-        msg = Message(**msg_data)
+        msg = Message(**{k: v for k, v in msg_data.items()
+                         if k in Message.__dataclass_fields__})
 
-        # Задание 3: фильтрация приватных
+        # Фильтр приватных
         if msg.target_session_id and msg.target_session_id != my_session_id:
             page.update()
             return
 
         add_message_to_ui(msg)
+
+        # Уведомление в title при чужом сообщении
+        if msg.user != user_name[0] and msg.user != BOT_NAME:
+            unread_count[0] += 1
+            page.title = f"({unread_count[0]}) {original_title}"
+
         page.update()
 
     page.pubsub.subscribe(on_message)
 
-    # ---------- Отправка ----------
+    # ============================================================
+    # Бот
+    # ============================================================
+    def bot_send(text: str) -> None:
+        payload = {
+            "user": BOT_NAME,
+            "text": text,
+            "timestamp": datetime.now().strftime("%H:%M"),
+            "type": "message",
+            "target_session_id": None,
+            "date": date.today().isoformat(),
+        }
+        page.pubsub.send_all(payload)
+
+    def handle_bot_command(text: str) -> bool:
+        """Возвращает True, если сообщение обработано ботом."""
+        low = text.strip().lower()
+
+        # Приветствие
+        if "привет" in low or "hello" in low or "hi" in low.split():
+            bot_send(f"Привет, {user_name[0]}! 👋 Напиши /help, чтобы узнать команды.")
+            return True
+
+        if not low.startswith("/"):
+            return False
+
+        cmd, _, arg = low.partition(" ")
+        arg = arg.strip()
+
+        if cmd == "/help":
+            lines = ["**Команды:**"] + [f"{k} — {v}" for k, v in BOT_COMMANDS.items()]
+            bot_send("\n".join(lines))
+        elif cmd == "/users":
+            if PARTICIPANTS:
+                names = ", ".join(sorted(PARTICIPANTS.keys()))
+                bot_send(f"👥 Сейчас в чате ({len(PARTICIPANTS)}): {names}")
+            else:
+                bot_send("В чате пока никого нет.")
+        elif cmd == "/time":
+            bot_send(f"🕐 Время сервера: {datetime.now().strftime('%H:%M:%S')}")
+        elif cmd == "/roll":
+            bot_send(f"🎲 Выпало: {random.randint(1, 100)}")
+        elif cmd == "/me":
+            if not arg:
+                bot_send("Использование: /me <действие>")
+            else:
+                bot_send(f"✨ *{user_name[0]} {arg}*")
+        elif cmd == "/clear":
+            chat_list.controls.clear()
+            last_rendered_date[0] = ""
+            last_author[0] = ""
+            page.update()
+        else:
+            bot_send(f"Неизвестная команда: {cmd}. Попробуй /help.")
+        return True
+
+    # ============================================================
+    # Отправка
+    # ============================================================
     last_typing_sent = [0.0]
 
-    def send_message(e: ft.ControlEvent) -> None:
+    def send_message(e=None) -> None:
         text = (message_input.value or "").strip()
         if not text or not user_name[0]:
             return
+        if len(text) > MAX_MSG_LEN:
+            text = text[:MAX_MSG_LEN]
 
-        # Задание 3: определяем адресата
+        # Бот обрабатывает команды
+        if handle_bot_command(text):
+            message_input.value = ""
+            char_counter.value = f"0/{MAX_MSG_LEN}"
+            page.update()
+            return
+
         target_name = recipient_dropdown.value
         target_sid = None
         if target_name and target_name != "all":
@@ -166,27 +442,36 @@ def main(page: ft.Page) -> None:
             "timestamp": datetime.now().strftime("%H:%M"),
             "type": "message",
             "target_session_id": target_sid,
+            "date": date.today().isoformat(),
         }
 
         page.pubsub.send_all(payload)
 
-        # Задание 4: сохраняем в историю (только публичные)
         if target_sid is None:
             HISTORY.append(payload)
             if len(HISTORY) > MAX_HISTORY:
                 HISTORY[:] = HISTORY[-MAX_HISTORY:]
 
         message_input.value = ""
+        char_counter.value = f"0/{MAX_MSG_LEN}"
         page.update()
 
     message_input.on_submit = send_message
 
-    # ---------- Задание 2: индикатор «печатает…» ----------
+    # ---------- Индикатор набора и счётчик символов ----------
     def on_input_change(e: ft.ControlEvent) -> None:
-        if not user_name[0]:
+        val = message_input.value or ""
+        char_counter.value = f"{len(val)}/{MAX_MSG_LEN}"
+        if len(val) > MAX_MSG_LEN:
+            char_counter.color = ft.Colors.RED_400
+        else:
+            char_counter.color = ft.Colors.GREY_600
+
+        if not user_name[0] or not val.strip():
             return
         now = time.monotonic()
         if now - last_typing_sent[0] < 2.0:
+            page.update()
             return
         last_typing_sent[0] = now
         page.pubsub.send_others({
@@ -195,76 +480,164 @@ def main(page: ft.Page) -> None:
             "timestamp": datetime.now().strftime("%H:%M"),
             "type": "typing",
         })
+        page.update()
 
     message_input.on_change = on_input_change
 
-    # ---------- Диалог входа ----------
-    name_field = ft.TextField(label="Ваше имя", autofocus=True, width=300)
+    # ============================================================
+    # Вход
+    # ============================================================
+    name_field = ft.TextField(
+        label="Ваше имя", autofocus=True, width=300,
+        border_color=ft.Colors.GREEN_400,
+        focused_border_color=ft.Colors.GREEN_400,
+        bgcolor=ft.Colors.GREY_900,
+    )
+    error_text = ft.Text("", size=12, color=ft.Colors.RED_400, visible=False)
+
     enter_dialog = ft.AlertDialog(
         modal=True,
-        title=ft.Text("Вход в чат"),
-        content=ft.Column([name_field], tight=True),
+        title=ft.Row([
+            ft.Icon(ft.Icons.CHAT_BUBBLE_ROUNDED, color=ft.Colors.GREEN_400),
+            ft.Text("Вход в чат", weight=ft.FontWeight.BOLD),
+        ], spacing=8),
+        content=ft.Column([
+            ft.Text("Представьтесь, чтобы начать общение",
+                    size=12, color=ft.Colors.GREY_400),
+            name_field,
+            error_text,
+        ], tight=True, spacing=10),
         actions=[],
+        bgcolor=ft.Colors.GREY_900,
     )
+
+    def update_online() -> None:
+        online_badge.content.controls[1].value = f"{len(PARTICIPANTS)} онлайн"
 
     def enter_chat(e: ft.ControlEvent) -> None:
         name = (name_field.value or "").strip()
         if not name:
+            error_text.value = "Введите имя"
+            error_text.visible = True
+            page.update()
             return
+        if len(name) > 20:
+            error_text.value = "Имя слишком длинное (макс. 20)"
+            error_text.visible = True
+            page.update()
+            return
+        if name in PARTICIPANTS:
+            error_text.value = "Это имя уже занято"
+            error_text.visible = True
+            page.update()
+            return
+
         user_name[0] = name
-
-        # Задание 3: регистрация участника
         PARTICIPANTS[name] = my_session_id
+        SESSION_NAMES[my_session_id] = name
+        update_online()
 
-        # Обновляем выпадающий список (все, кроме себя)
+        # Обновляем список получателей
         recipient_dropdown.options = [ft.dropdown.Option("all", "Всем")] + [
             ft.dropdown.Option(n, n) for n in PARTICIPANTS if n != name
         ]
+        logout_btn.visible = True
 
         page.pop_dialog()
 
-        # Задание 4: загружаем историю для новичка
+        # История
         for hist_msg in HISTORY:
             add_message_to_ui(Message(**hist_msg))
 
-        # Системное сообщение
         sys_payload = {
             "user": "Система",
-            "text": f"{name} присоединился к чату",
+            "text": f"👋 {name} присоединился к чату",
             "timestamp": datetime.now().strftime("%H:%M"),
             "type": "message",
+            "target_session_id": None,
+            "date": date.today().isoformat(),
         }
         page.pubsub.send_all(sys_payload)
         page.update()
 
-    enter_dialog.actions = [ft.Button("Войти", on_click=enter_chat)]
+    enter_dialog.actions = [
+        ft.TextButton("Войти", on_click=enter_chat,
+                      style=ft.ButtonStyle(color=ft.Colors.GREEN_400)),
+    ]
+    name_field.on_submit = enter_chat
     page.show_dialog(enter_dialog)
 
-    # ---------- Раскладка ----------
+    # ============================================================
+    # Выход
+    # ============================================================
+    def do_logout(e=None) -> None:
+        name = user_name[0]
+        if not name:
+            return
+        PARTICIPANTS.pop(name, None)
+        SESSION_NAMES.pop(my_session_id, None)
+        user_name[0] = None
+        update_online()
+        logout_btn.visible = False
+        recipient_dropdown.value = "all"
+        recipient_dropdown.options = [ft.dropdown.Option("all", "Всем")]
+        chat_list.controls.clear()
+        last_rendered_date[0] = ""
+        last_author[0] = ""
+        page.pubsub.send_all({
+            "user": "Система",
+            "text": f"👋 {name} покинул чат",
+            "timestamp": datetime.now().strftime("%H:%M"),
+            "type": "message",
+            "target_session_id": None,
+            "date": date.today().isoformat(),
+        })
+        # Снова показываем диалог входа
+        name_field.value = ""
+        error_text.visible = False
+        page.show_dialog(enter_dialog)
+        page.update()
+
+    logout_btn.on_click = do_logout
+
+    # Корректная обработка закрытия вкладки
+    def on_disconnect(e=None) -> None:
+        name = user_name[0]
+        if not name:
+            return
+        PARTICIPANTS.pop(name, None)
+        SESSION_NAMES.pop(my_session_id, None)
+        page.pubsub.send_all({
+            "user": "Система",
+            "text": f"👋 {name} отключился",
+            "timestamp": datetime.now().strftime("%H:%M"),
+            "type": "message",
+            "target_session_id": None,
+            "date": date.today().isoformat(),
+        })
+
+    page.on_disconnect = on_disconnect
+
+    # Сброс счётчика непрочитанных при фокусе
+    def on_connect(e=None) -> None:
+        unread_count[0] = 0
+        page.title = original_title
+
+    page.on_connect = on_connect
+
+    # ============================================================
+    # Раскладка
+    # ============================================================
     page.add(
-        ft.Container(
-            content=ft.Column([
-                ft.Row([
-                    ft.Icon(ft.Icons.CHAT, color=ft.Colors.GREEN_400),
-                    ft.Text("Flet Chat", size=20, weight=ft.FontWeight.BOLD,
-                            color=ft.Colors.WHITE),
-                ]),
-                ft.Divider(color=ft.Colors.GREY_700),
-                chat_list,
-                typing_status,
-                ft.Row([
-                    message_input,
-                    recipient_dropdown,
-                    ft.IconButton(ft.Icons.SEND, icon_color=ft.Colors.GREEN,
-                                  on_click=send_message),
-                ]),
-            ], expand=True),
-            expand=True,
-            padding=10,
-        )
+        ft.Column([
+            header,
+            chat_list,
+            typing_status,
+            input_bar,
+        ], expand=True, spacing=0)
     )
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    ft.run(main, view=ft.AppView.WEB_BROWSER, port=port)
+    ft.run(main, view=ft.AppView.WEB_BROWSER, host="0.0.0.0", port=port)

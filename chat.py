@@ -1,6 +1,11 @@
 import os
+import ast
+import json
 import time
 import random
+import threading
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, date
 
@@ -22,6 +27,10 @@ LOBBY_HISTORY: list[dict] = []
 DM_HISTORY: dict[str, list[dict]] = {}     # topic -> [msg, ...]
 MAX_HISTORY = 100
 
+# phone -> {"code": str, "expires": float} — ожидаемые SMS-коды входа
+PENDING_CODES: dict[str, dict] = {}
+CODE_TTL = 300  # срок действия кода, секунд
+
 PALETTE = [
     ft.Colors.BLUE_400, ft.Colors.ORANGE_400, ft.Colors.PURPLE_400,
     ft.Colors.TEAL_400, ft.Colors.PINK_400, ft.Colors.AMBER_400,
@@ -33,15 +42,55 @@ BOT_NAME = "Бот"
 LOBBY_KEY = "lobby"
 
 BOT_COMMANDS = {
-    "/help": "Показать список команд",
+    "/help": "Список всех команд",
     "/users": "Кто сейчас в чате",
+    "/whoami": "Ваше имя и телефон",
+    "/stats": "Статистика активного чата",
     "/time": "Текущее время сервера",
+    "/ping": "Проверка связи (понг)",
     "/roll": "Случайное число 1–100",
-    "/me <действие>": "Эмодзи-действие, например /me машет рукой",
+    "/dice": "Бросок кубика 1–6",
+    "/flip": "Орёл или решка",
+    "/8ball <вопрос>": "Магический шар ответит",
+    "/choose a b c": "Случайный вариант из списка",
+    "/joke": "Случайная шутка",
+    "/quote": "Случайная цитата",
+    "/calc <выражение>": "Калькулятор: /calc 2*(3+4)",
+    "/weather <город>": "Погода через wttr.in",
+    "/remind <сек> <текст>": "Напоминание через N секунд",
+    "/nick <имя>": "Сменить отображаемое имя",
+    "/me <действие>": "Эмодзи-действие, /me машает рукой",
     "/clear": "Очистить ленту у себя",
 }
 
 MAX_MSG_LEN = 500
+
+JOKES = [
+    "Программист идёт в магазин: «Купи батон, если будут яйца — возьми десяток». "
+    "Возвращается с 10 батонами.",
+    "Сколько программистов нужно, чтобы вкрутить лампочку? Ни одного — "
+    "это аппаратная проблема.",
+    "Есть 10 типов людей: те, кто понимает двоичную систему, и те, кто нет.",
+    "Почему программисты путают Хэллоуин и Рождество? Потому что 31 OCT = 25 DEC.",
+    "Отлаживать код — это как быть детективом, где ты и убийца.",
+    "Сын программиста: «Пап, а почему солнце всходит?» — «Всё работает, не трогай».",
+]
+
+QUOTES = [
+    "«Простота — залог надёжности.» — Эдсгер Дейкстра",
+    "«Сначала заставь работать, затем сделай правильным, затем быстрым.» — Кент Бек",
+    "«Лучшее — враг хорошего.» — Вольтер",
+    "«Код — это поэзия.» — Неизвестный",
+    "«Любой дурак напишет код для компьютера. Хороший программист пишет для людей.» "
+    "— Мартин Фаулер",
+]
+
+EIGHT_BALL = [
+    "Определённо да", "Мои источники говорят: да", "Без сомнений", "Да, точно",
+    "Скорее всего", "Спроси позже", "Лучше не рассказывать", "Сейчас неясно",
+    "Сконцентрируйся и спроси снова", "Не рассчитывай на это", "Мой ответ — нет",
+    "По моим данным — нет", "Очень сомнительно",
+]
 
 
 # ============================================================
@@ -101,6 +150,52 @@ def now_time() -> str:
 
 def today_iso() -> str:
     return date.today().isoformat()
+
+
+def safe_calc(expr: str):
+    """Безопасное вычисление арифметического выражения.
+
+    Разрешены только числа и операции + - * / % // ** и унарные + -.
+    Любые имена, вызовы и атрибуты отбрасываются.
+    """
+    allowed = {
+        ast.Add: lambda a, b: a + b,
+        ast.Sub: lambda a, b: a - b,
+        ast.Mult: lambda a, b: a * b,
+        ast.Div: lambda a, b: a / b,
+        ast.FloorDiv: lambda a, b: a // b,
+        ast.Mod: lambda a, b: a % b,
+        ast.Pow: lambda a, b: a ** b,
+        ast.UAdd: lambda a: +a,
+        ast.USub: lambda a: -a,
+    }
+    node = ast.parse(expr, mode="eval")
+
+    def ev(n):
+        if isinstance(n, ast.Expression):
+            return ev(n.body)
+        if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
+            return n.value
+        if isinstance(n, ast.BinOp) and type(n.op) in allowed:
+            return allowed[type(n.op)](ev(n.left), ev(n.right))
+        if isinstance(n, ast.UnaryOp) and type(n.op) in allowed:
+            return allowed[type(n.op)](ev(n.operand))
+        raise ValueError("недопустимое выражение")
+
+    return ev(node)
+
+
+def fetch_weather(city: str) -> str:
+    """Погода через wttr.in (без ключа). Бросает исключение при сбое сети."""
+    url = "https://wttr.in/" + urllib.parse.quote(city) + "?format=j1&lang=ru"
+    req = urllib.request.Request(url, headers={"User-Agent": "curl/8"})
+    with urllib.request.urlopen(req, timeout=6) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    cur = data["current_condition"][0]
+    desc = cur.get("lang_ru", [{"value": cur["weatherDesc"][0]["value"]}])[0]["value"]
+    return (f"{city}: {desc}, {cur['temp_C']}°C "
+            f"(ощущается {cur['FeelsLikeC']}°C), "
+            f"влажность {cur['humidity']}%, ветер {cur['windspeedKmph']} км/ч")
 
 
 # ============================================================
@@ -185,16 +280,39 @@ def main(page: ft.Page) -> None:
             on_click=lambda e: on_command_menu(cmd, needs_arg),
         )
 
+    def cmd_header(text: str):
+        return ft.PopupMenuItem(
+            content=ft.Text(text, size=11, italic=True,
+                            weight=ft.FontWeight.BOLD, color=ft.Colors.GREY_500),
+            height=24,
+        )
+
     commands_menu = ft.PopupMenuButton(
         icon=ft.Icons.MORE_VERT,
         icon_color=ft.Colors.WHITE,
         icon_size=22,
         tooltip="Команды бота",
         items=[
+            cmd_header("Информация"),
             make_cmd_item("Помощь — /help", ft.Icons.HELP_OUTLINE, "/help", False),
             make_cmd_item("Кто онлайн — /users", ft.Icons.GROUP, "/users", False),
-            make_cmd_item("Время сервера — /time", ft.Icons.ACCESS_TIME, "/time", False),
-            make_cmd_item("Случайное число — /roll", ft.Icons.CASINO, "/roll", False),
+            make_cmd_item("Кто я — /whoami", ft.Icons.PERSON, "/whoami", False),
+            make_cmd_item("Статистика — /stats", ft.Icons.BAR_CHART, "/stats", False),
+            make_cmd_item("Время — /time", ft.Icons.ACCESS_TIME, "/time", False),
+            make_cmd_item("Связь — /ping", ft.Icons.WIFI, "/ping", False),
+            cmd_header("Развлечения"),
+            make_cmd_item("Число 1–100 — /roll", ft.Icons.CASINO, "/roll", False),
+            make_cmd_item("Кубик 1–6 — /dice", ft.Icons.CASINO, "/dice", False),
+            make_cmd_item("Орёл/решка — /flip", ft.Icons.FLIP_CAMERA_ANDROID, "/flip", False),
+            make_cmd_item("Магический шар — /8ball", ft.Icons.HELP, "/8ball", True),
+            make_cmd_item("Выбор из списка — /choose", ft.Icons.LIST, "/choose", True),
+            make_cmd_item("Шутка — /joke", ft.Icons.EMOJI_EMOTIONS, "/joke", False),
+            make_cmd_item("Цитата — /quote", ft.Icons.FORMAT_QUOTE, "/quote", False),
+            cmd_header("Утилиты"),
+            make_cmd_item("Калькулятор — /calc", ft.Icons.CALCULATE, "/calc", True),
+            make_cmd_item("Погода — /weather", ft.Icons.WB_SUNNY, "/weather", True),
+            make_cmd_item("Напоминание — /remind", ft.Icons.NOTIFICATIONS, "/remind", True),
+            make_cmd_item("Сменить имя — /nick", ft.Icons.BADGE, "/nick", True),
             make_cmd_item("Действие — /me", ft.Icons.WAVING_HAND, "/me", True),
             make_cmd_item("Очистить ленту — /clear", ft.Icons.CLEAR_ALL, "/clear", False),
         ],
@@ -394,16 +512,23 @@ def main(page: ft.Page) -> None:
 
         bubble_children = []
         if show_header:
-            bubble_children.append(
-                ft.Row([
-                    ft.Text(msg.user, weight=ft.FontWeight.BOLD, size=12,
-                            color=nick_color),
-                    ft.Text(msg.timestamp, size=10, color=ft.Colors.GREY_500),
-                ], spacing=8, tight=True)
-            )
+            header_controls = []
+            if is_own:
+                header_controls.append(ft.Container(
+                    content=ft.Text("Вы", size=9, color=ft.Colors.WHITE,
+                                    weight=ft.FontWeight.BOLD),
+                    padding=ft.Padding.symmetric(horizontal=5, vertical=1),
+                    border_radius=6,
+                    bgcolor=ft.Colors.GREEN_600,
+                ))
+            header_controls.append(ft.Text(
+                msg.user, weight=ft.FontWeight.BOLD, size=12,
+                color=ft.Colors.GREEN_400 if is_own else nick_color))
+            header_controls.append(ft.Text(msg.timestamp, size=10,
+                                           color=ft.Colors.GREY_500))
+            bubble_children.append(ft.Row(header_controls, spacing=8, tight=True))
         bubble_children.append(
-            ft.Text(msg.text, size=14, color=ft.Colors.WHITE,
-                    selectable=True)
+            ft.Text(msg.text, size=14, color=ft.Colors.WHITE, selectable=True)
         )
 
         bubble = ft.Container(
@@ -412,28 +537,22 @@ def main(page: ft.Page) -> None:
             padding=ft.Padding.symmetric(horizontal=14, vertical=10),
             border_radius=ft.BorderRadius.only(
                 top_left=16, top_right=16,
-                bottom_left=4 if is_own else 16,
-                bottom_right=16 if is_own else 4,
+                bottom_left=4, bottom_right=16,
             ),
-            max_width=420,
+            max_width=460,
             shadow=ft.BoxShadow(blur_radius=6, spread_radius=0,
                                 color=ft.Colors.with_opacity(0.2, ft.Colors.BLACK),
                                 offset=ft.Offset(0, 1)),
         )
 
+        # ВСЕ сообщения выровнены слева: аватар + пузырь + растяжка.
+        # Свои сообщения отличает зелёный пузырь и бейдж «Вы».
+        avatar = (make_avatar(msg.user, msg.sender_phone or msg.user, size=32)
+                  if show_header else ft.Container(width=32))
         row = ft.Row(
-            [
-                ft.Container(expand=True),
-                bubble,
-                ft.Container(),
-            ] if is_own else [
-                make_avatar(msg.user, msg.sender_phone or msg.user, size=32)
-                if show_header else ft.Container(width=32),
-                bubble,
-                ft.Container(expand=True),
-            ],
+            [avatar, bubble, ft.Container(expand=True)],
             spacing=8,
-            vertical_alignment=ft.CrossAxisAlignment.END,
+            vertical_alignment=ft.CrossAxisAlignment.START,
         )
         chat_list.controls.append(row)
 
@@ -641,7 +760,7 @@ def main(page: ft.Page) -> None:
         t = data.get("type")
         phone = data.get("phone")
         name = data.get("name", "?")
-        if not phone or phone == my_phone[0]:
+        if not my_phone[0] or not phone or phone == my_phone[0]:
             return
 
         if t in ("hello", "here"):
@@ -684,6 +803,9 @@ def main(page: ft.Page) -> None:
         return DM_HISTORY.setdefault(topic, [])
 
     def on_chat_message(topic: str, data: dict) -> None:
+        # до авторизации сообщения не обрабатываем
+        if not my_phone[0]:
+            return
         # typing-события
         if data.get("type") == "typing":
             sender = data.get("name", "?")
@@ -726,9 +848,8 @@ def main(page: ft.Page) -> None:
 
         page.update()
 
-    # подписки на presence и лобби — после определения on_chat_message
-    page.pubsub.subscribe_topic("presence", on_presence)
-    page.pubsub.subscribe_topic(LOBBY_KEY, on_chat_message)
+    # подписки на presence и лобби выполняются после входа (см. subscribe_core),
+    # чтобы не обрабатывать чужое присутствие до авторизации
 
     # ============================================================
     # БОТ / КОМАНДЫ
@@ -769,6 +890,8 @@ def main(page: ft.Page) -> None:
             return False
         cmd, _, arg = low.partition(" ")
         arg = arg.strip()
+        # оригинальный регистр для команд, чувствительных к тексту (/me, /nick, /weather)
+        raw_arg = text.strip()[len(cmd):].strip()
 
         if cmd == "/help":
             lines = ["Команды бота:"]
@@ -780,17 +903,143 @@ def main(page: ft.Page) -> None:
             bot_send(f"Сейчас в сети ({len(names)}): "
                      + (", ".join(sorted(names)) if names else "только вы"),
                      kind="system")
+        elif cmd == "/whoami":
+            bot_send(f"Вы: {my_name[0]} · {format_phone(my_phone[0])}",
+                     kind="system")
+        elif cmd == "/stats":
+            hist = history_for_key(active_chat[0])
+            total = len(hist)
+            authors: dict[str, int] = {}
+            for m in hist:
+                if m.get("kind") in ("system", "me"):
+                    continue
+                a = m.get("user", "?")
+                authors[a] = authors.get(a, 0) + 1
+            top = sorted(authors.items(), key=lambda x: -x[1])[:3]
+            top_s = ", ".join(f"{n} ({c})" for n, c in top) or "—"
+            label = ("Общий чат" if active_chat[0] == LOBBY_KEY
+                     else "Личный чат")
+            bot_send(f"📊 {label}: сообщений {total}, авторов {len(authors)}. "
+                     f"Топ: {top_s}", kind="system")
         elif cmd == "/time":
             bot_send(f"Время сервера: "
                      f"{datetime.now().strftime('%H:%M:%S')}", kind="system")
+        elif cmd == "/ping":
+            bot_send("🏓 понг!", kind="system")
         elif cmd == "/roll":
             bot_send(f"🎲 Выпало: {random.randint(1, 100)}")
-        elif cmd == "/me":
+        elif cmd == "/dice":
+            bot_send(f"🎲 Кубик: {random.randint(1, 6)}")
+        elif cmd == "/flip":
+            bot_send(f"🪙 {random.choice(['Орёл', 'Решка'])}")
+        elif cmd == "/8ball":
             if not arg:
+                add_system_locally("Использование: /8ball <вопрос>")
+                page.update()
+            else:
+                bot_send(f"🎱 {random.choice(EIGHT_BALL)}", kind="system")
+        elif cmd == "/choose":
+            opts = [o for o in arg.split() if o]
+            if len(opts) < 2:
+                add_system_locally("Использование: /choose a b c …")
+                page.update()
+            else:
+                bot_send(f"👉 Выбрано: {random.choice(opts)}", kind="system")
+        elif cmd == "/joke":
+            bot_send(f"😄 {random.choice(JOKES)}", kind="system")
+        elif cmd == "/quote":
+            bot_send(random.choice(QUOTES), kind="system")
+        elif cmd == "/calc":
+            if not arg:
+                add_system_locally("Использование: /calc <выражение>")
+                page.update()
+            else:
+                try:
+                    res = safe_calc(arg)
+                    bot_send(f"🧮 {arg} = {res}", kind="system")
+                except ZeroDivisionError:
+                    add_system_locally("Деление на ноль!")
+                    page.update()
+                except Exception:
+                    add_system_locally("Не удалось вычислить (только числа "
+                                       "и + - * / % // **)")
+                    page.update()
+        elif cmd == "/weather":
+            city = raw_arg
+            if not city:
+                add_system_locally("Использование: /weather <город>")
+                page.update()
+            else:
+                add_system_locally(f"🌤 Запрашиваю погоду: {city}…")
+                page.update()
+
+                def _w(c=city):
+                    try:
+                        bot_send(fetch_weather(c), kind="system")
+                    except Exception:
+                        bot_send(f"Не удалось узнать погоду для «{c}». "
+                                 "Возможно, нет сети или город не найден.",
+                                 kind="system")
+
+                threading.Thread(target=_w, daemon=True).start()
+        elif cmd == "/remind":
+            parts = arg.split(maxsplit=1)
+            if len(parts) != 2:
+                add_system_locally("Использование: /remind <секунды> <текст>")
+                page.update()
+            else:
+                try:
+                    secs = int(parts[0])
+                except ValueError:
+                    add_system_locally("Секунды должны быть числом")
+                    page.update()
+                    return True
+                if not (1 <= secs <= 600):
+                    add_system_locally("Задержка от 1 до 600 секунд")
+                    page.update()
+                    return True
+                rem_text = parts[1]
+                add_system_locally(f"⏰ Напомню через {secs}с: {rem_text}")
+                page.update()
+                key = active_chat[0]
+                topic = (LOBBY_KEY if key == LOBBY_KEY
+                         else dm_topic(my_phone[0], key))
+
+                def _fire():
+                    payload = {
+                        "user": BOT_NAME,
+                        "text": f"⏰ Напоминание для {my_name[0]}: {rem_text}",
+                        "timestamp": now_time(),
+                        "sender_phone": BOT_NAME,
+                        "kind": "system",
+                        "date": today_iso(),
+                    }
+                    try:
+                        page.pubsub.send_all_on_topic(topic, payload)
+                    except Exception:
+                        pass
+
+                threading.Timer(secs, _fire).start()
+        elif cmd == "/nick":
+            new = raw_arg
+            if not new or len(new) > 24:
+                add_system_locally("Имя: 1–24 символа")
+                page.update()
+            else:
+                my_name[0] = new
+                PARTICIPANTS[my_phone[0]]["name"] = new
+                update_profile()
+                build_sidebar_chats()
+                update_header()
+                announce_here()
+                add_system_locally(f"Вы сменили имя на «{new}»")
+                page.update()
+        elif cmd == "/me":
+            if not raw_arg:
                 add_system_locally("Использование: /me <действие>")
                 page.update()
             else:
-                bot_send(f"✨ *{my_name[0]} {arg}*", kind="me")
+                bot_send(f"✨ *{my_name[0]} {raw_arg}*", kind="me")
         elif cmd == "/clear":
             history = history_for_key(active_chat[0])
             history.clear()
@@ -887,54 +1136,104 @@ def main(page: ft.Page) -> None:
     back_btn.on_click = go_back
 
     # ============================================================
-    # ДИАЛОГ ВХОДА (имя + телефон)
+    # ДИАЛОГ ВХОДА — двухшаговый: телефон → SMS-код
     # ============================================================
     name_field = ft.TextField(
-        label="Ваше имя", autofocus=True, width=300,
+        label="Имя (необязательно)", width=300,
         border_color=ft.Colors.GREEN_400,
         focused_border_color=ft.Colors.GREEN_400,
-        bgcolor=ft.Colors.GREY_800,
+        bgcolor=ft.Colors.GREY_900,
     )
     phone_field = ft.TextField(
         label="Номер телефона", width=300,
         hint_text="+7 999 123-45-67",
         border_color=ft.Colors.GREEN_400,
         focused_border_color=ft.Colors.GREEN_400,
-        bgcolor=ft.Colors.GREY_800,
+        bgcolor=ft.Colors.GREY_900,
         keyboard_type=ft.KeyboardType.PHONE,
     )
+    code_field = ft.TextField(
+        label="Код из SMS", width=300,
+        hint_text="000000",
+        border_color=ft.Colors.GREEN_400,
+        focused_border_color=ft.Colors.GREEN_400,
+        bgcolor=ft.Colors.GREY_900,
+        keyboard_type=ft.KeyboardType.NUMBER,
+        max_length=6,
+    )
     error_text = ft.Text("", size=12, color=ft.Colors.RED_400, visible=False)
+    code_notice = ft.Container(
+        content=ft.Text("", size=12, color=ft.Colors.AMBER_400),
+        padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+        border_radius=8,
+        bgcolor=ft.Colors.with_opacity(0.12, ft.Colors.AMBER_400),
+    )
 
     enter_dialog = ft.AlertDialog(
         modal=True,
         title=ft.Row([
-            ft.Icon(ft.Icons.CHAT_BUBBLE_ROUNDED, color=ft.Colors.GREEN_400),
+            ft.Icon(ft.Icons.SMS, color=ft.Colors.GREEN_400),
             ft.Text("Вход в чат", weight=ft.FontWeight.BOLD,
                     color=ft.Colors.WHITE),
         ], spacing=8),
-        content=ft.Column([
-            ft.Text("Представьтесь и укажите номер телефона — "
-                    "по нему вас найдут для личных сообщений.",
-                    size=12, color=ft.Colors.GREY_400),
-            name_field,
-            phone_field,
-            error_text,
-        ], tight=True, spacing=10),
+        content=ft.Column([], tight=True, spacing=10),
         actions=[],
         bgcolor=ft.Colors.GREY_800,
     )
 
-    def enter_chat(e: ft.ControlEvent) -> None:
+    # состояние входа и флаг базовых подписок
+    pending = {"phone": None, "name": "", "code": None, "expires": 0.0}
+    core_subscribed = [False]
+
+    def subscribe_core() -> None:
+        """Подписка на presence и лобби — только после авторизации."""
+        if core_subscribed[0]:
+            return
+        page.pubsub.subscribe_topic("presence", on_presence)
+        page.pubsub.subscribe_topic(LOBBY_KEY, on_chat_message)
+        core_subscribed[0] = True
+
+    def set_login_step(step: int, update: bool = True) -> None:
+        error_text.value = ""
+        error_text.visible = False
+        if step == 1:
+            enter_dialog.content = ft.Column([
+                ft.Text("Введите номер телефона — на него придёт SMS-код. "
+                        "Имя можно оставить пустым.",
+                        size=12, color=ft.Colors.GREY_400),
+                name_field,
+                phone_field,
+                error_text,
+            ], tight=True, spacing=10)
+            enter_dialog.actions = [
+                ft.TextButton("Получить код", on_click=send_code,
+                              style=ft.ButtonStyle(color=ft.Colors.GREEN_400)),
+            ]
+            name_field.autofocus = True
+        else:
+            enter_dialog.content = ft.Column([
+                ft.Text(f"📞 Код отправлен на {format_phone(pending['phone'])}",
+                        size=12, color=ft.Colors.GREY_400),
+                code_notice,
+                code_field,
+                error_text,
+            ], tight=True, spacing=10)
+            enter_dialog.actions = [
+                ft.TextButton("Назад", on_click=back_to_step1),
+                ft.TextButton("Повторить код", on_click=resend_code),
+                ft.TextButton("Войти", on_click=verify_code,
+                              style=ft.ButtonStyle(color=ft.Colors.GREEN_400)),
+            ]
+            code_field.value = ""
+            code_field.autofocus = True
+        if update:
+            page.update()
+
+    def send_code(e: ft.ControlEvent = None) -> None:
         name = (name_field.value or "").strip()
         raw_phone = phone_field.value or ""
         phone = normalize_phone(raw_phone)
-
-        if not name:
-            error_text.value = "Введите имя"
-            error_text.visible = True
-            page.update()
-            return
-        if len(name) > 24:
+        if name and len(name) > 24:
             error_text.value = "Имя слишком длинное (макс. 24)"
             error_text.visible = True
             page.update()
@@ -950,25 +1249,77 @@ def main(page: ft.Page) -> None:
             error_text.visible = True
             page.update()
             return
+        code = f"{random.randint(0, 999999):06d}"
+        pending["phone"] = phone
+        pending["name"] = name
+        pending["code"] = code
+        pending["expires"] = time.time() + CODE_TTL
+        PENDING_CODES[phone] = {"code": code, "expires": pending["expires"]}
+        code_notice.content.value = (
+            "📱 Демо-режим: реальная SMS не отправляется.\n"
+            f"Ваш код: {code}"
+        )
+        set_login_step(2)
 
+    def resend_code(e: ft.ControlEvent = None) -> None:
+        if not pending["phone"]:
+            set_login_step(1)
+            return
+        code = f"{random.randint(0, 999999):06d}"
+        pending["code"] = code
+        pending["expires"] = time.time() + CODE_TTL
+        PENDING_CODES[pending["phone"]] = {"code": code,
+                                           "expires": pending["expires"]}
+        code_notice.content.value = (
+            "📱 Демо-режим: реальная SMS не отправляется.\n"
+            f"Новый код: {code}"
+        )
+        code_field.value = ""
+        error_text.visible = False
+        page.update()
+
+    def back_to_step1(e: ft.ControlEvent = None) -> None:
+        pending["phone"] = None
+        pending["code"] = None
+        set_login_step(1)
+
+    def verify_code(e: ft.ControlEvent = None) -> None:
+        if not pending["phone"]:
+            set_login_step(1)
+            return
+        entered = (code_field.value or "").strip()
+        if time.time() > pending["expires"]:
+            error_text.value = "Код истёк — запросите новый"
+            error_text.visible = True
+            page.update()
+            return
+        if entered != pending["code"]:
+            error_text.value = "Неверный код"
+            error_text.visible = True
+            page.update()
+            return
+
+        phone = pending["phone"]
+        name = pending["name"] or f"Пользователь {phone[-4:]}"
         my_name[0] = name
         my_phone[0] = phone
         PARTICIPANTS[phone] = {"name": name, "session_id": my_session_id}
+        PENDING_CODES.pop(phone, None)
+        pending.update({"phone": None, "name": "", "code": None, "expires": 0.0})
 
         update_profile()
         update_online_count()
         build_sidebar_chats()
         logout_btn.visible = True
+        subscribe_core()
         page.pop_dialog()
 
-        # показываем общий чат
         active_chat[0] = LOBBY_KEY
         unread.clear()
         render_active_chat()
         update_header()
         apply_layout()
 
-        # приветствие системы в лобби
         page.pubsub.send_all_on_topic(LOBBY_KEY, {
             "user": "Система",
             "text": f"👋 {name} присоединился к чату",
@@ -977,21 +1328,19 @@ def main(page: ft.Page) -> None:
             "kind": "system",
             "date": today_iso(),
         })
-        # рассылаем присутствие
         announce_hello()
         page.update()
 
-    enter_dialog.actions = [
-        ft.TextButton("Войти", on_click=enter_chat,
-                      style=ft.ButtonStyle(color=ft.Colors.GREEN_400)),
-    ]
-    name_field.on_submit = enter_chat
-    phone_field.on_submit = enter_chat
+    name_field.on_submit = send_code
+    phone_field.on_submit = send_code
+    code_field.on_submit = verify_code
 
     def show_login() -> None:
         name_field.value = ""
         phone_field.value = ""
-        error_text.visible = False
+        code_field.value = ""
+        pending.update({"phone": None, "name": "", "code": None, "expires": 0.0})
+        set_login_step(1, update=False)
         page.show_dialog(enter_dialog)
 
     show_login()
@@ -1018,6 +1367,7 @@ def main(page: ft.Page) -> None:
             page.pubsub.unsubscribe_all()
         except Exception:
             pass
+        core_subscribed[0] = False
         my_dm_topics.clear()
         my_phone[0] = None
         my_name[0] = None
@@ -1037,6 +1387,7 @@ def main(page: ft.Page) -> None:
             return
         PARTICIPANTS.pop(phone, None)
         announce_bye()
+        core_subscribed[0] = False
         try:
             page.pubsub.unsubscribe_all()
         except Exception:

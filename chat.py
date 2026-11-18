@@ -96,7 +96,7 @@ def main(page: ft.Page) -> None:
                          bgcolor=ft.Colors.GREEN_400),
             ft.Text("0 онлайн", size=12, color=ft.Colors.GREY_300),
         ], spacing=6, tight=True),
-        padding=ft.padding.symmetric(horizontal=10, vertical=4),
+        padding=ft.Padding.symmetric(horizontal=10, vertical=4),
         border_radius=12,
         bgcolor=ft.Colors.with_opacity(0.15, ft.Colors.GREEN_400),
     )
@@ -125,25 +125,25 @@ def main(page: ft.Page) -> None:
             online_badge,
             logout_btn,
         ], spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-        padding=ft.padding.symmetric(horizontal=16, vertical=12),
+        padding=ft.Padding.symmetric(horizontal=16, vertical=12),
         gradient=ft.LinearGradient(
             begin=ft.Alignment.TOP_LEFT,
             end=ft.Alignment.BOTTOM_RIGHT,
             colors=[ft.Colors.GREY_900, ft.Colors.GREY_800],
         ),
-        border=ft.border.only(bottom=ft.BorderSide(1, ft.Colors.GREY_800)),
+        border=ft.Border.only(bottom=ft.BorderSide(1, ft.Colors.GREY_800)),
     )
 
     # ---------- Лента ----------
     chat_list = ft.ListView(
         expand=True, spacing=6,
-        padding=ft.padding.symmetric(horizontal=16, vertical=16),
+        padding=ft.Padding.symmetric(horizontal=16, vertical=16),
         auto_scroll=True,
     )
 
     typing_status = ft.Container(
         content=ft.Row([], spacing=6, tight=True),
-        padding=ft.padding.only(left=16, bottom=4),
+        padding=ft.Padding.only(left=16, bottom=4),
         visible=False,
     )
 
@@ -155,7 +155,7 @@ def main(page: ft.Page) -> None:
         focused_border_color=ft.Colors.GREEN_400,
         bgcolor=ft.Colors.GREY_800,
         border_radius=24,
-        content_padding=ft.padding.symmetric(horizontal=18, vertical=14),
+        content_padding=ft.Padding.symmetric(horizontal=18, vertical=14),
         multiline=True,
         min_lines=1,
         max_lines=4,
@@ -182,7 +182,7 @@ def main(page: ft.Page) -> None:
         bgcolor=ft.Colors.GREY_800,
         border_color=ft.Colors.GREY_700,
         border_radius=12,
-        content_padding=ft.padding.symmetric(horizontal=12, vertical=8),
+        content_padding=ft.Padding.symmetric(horizontal=12, vertical=8),
     )
 
     input_bar = ft.Container(
@@ -197,9 +197,9 @@ def main(page: ft.Page) -> None:
                 char_counter,
             ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         ], spacing=6),
-        padding=ft.padding.symmetric(horizontal=16, vertical=10),
+        padding=ft.Padding.symmetric(horizontal=16, vertical=10),
         bgcolor=ft.Colors.GREY_900,
-        border=ft.border.only(top=ft.BorderSide(1, ft.Colors.GREY_800)),
+        border=ft.Border.only(top=ft.BorderSide(1, ft.Colors.GREY_800)),
     )
 
     # ============================================================
@@ -215,7 +215,7 @@ def main(page: ft.Page) -> None:
                 content=ft.Text(format_date_label(d), size=11,
                                 color=ft.Colors.GREY_400),
                 alignment=ft.Alignment.CENTER,
-                padding=ft.padding.symmetric(vertical=8),
+                padding=ft.Padding.symmetric(vertical=8),
             )
         )
 
@@ -247,7 +247,7 @@ def main(page: ft.Page) -> None:
                     content=ft.Text(msg.text, size=11, italic=True,
                                     color=ft.Colors.GREY_500),
                     alignment=ft.Alignment.CENTER,
-                    padding=ft.padding.symmetric(vertical=4),
+                    padding=ft.Padding.symmetric(vertical=4),
                 )
             )
             last_author[0] = "Система"
@@ -284,8 +284,8 @@ def main(page: ft.Page) -> None:
             bgcolor=(ft.Colors.GREEN_800 if is_own
                      else ft.Colors.GREY_800 if not is_bot
                      else ft.Colors.INDIGO_900),
-            padding=ft.padding.symmetric(horizontal=14, vertical=10),
-            border_radius=ft.border_radius.only(
+            padding=ft.Padding.symmetric(horizontal=14, vertical=10),
+            border_radius=ft.BorderRadius.only(
                 top_left=16, top_right=16,
                 bottom_left=4 if is_own else 16,
                 bottom_right=16 if is_own else 4,

@@ -1,12 +1,13 @@
 import os
 import ast
+import uuid
 import json
 import time
 import random
 import threading
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, date
 
 import flet as ft
@@ -17,19 +18,23 @@ import flet as ft
 os.environ.setdefault("FLET_FORCE_WEB_SERVER", "true")
 
 # ============================================================
+# ЦВЕТОВАЯ ПАЛИТРА (акцент — телеграмовский синий)
+# ============================================================
+ACCENT = ft.Colors.BLUE_400
+ACCENT_MED = ft.Colors.BLUE_600
+ACCENT_DEEP = ft.Colors.BLUE_700
+ONLINE_CLR = ft.Colors.GREEN_400
+
+# ============================================================
 # ГЛОБАЛЬНОЕ СОСТОЯНИЕ (один процесс — один хаб pubsub)
 # ============================================================
-# phone -> {"name": str, "session_id": str}
-PARTICIPANTS: dict[str, dict] = {}
+PARTICIPANTS: dict[str, dict] = {}          # phone -> {"name", "session_id"}
+PENDING_CODES: dict[str, dict] = {}         # phone -> {"code", "expires"}
+CODE_TTL = 300
 
-# История сообщений
 LOBBY_HISTORY: list[dict] = []
-DM_HISTORY: dict[str, list[dict]] = {}     # topic -> [msg, ...]
-MAX_HISTORY = 100
-
-# phone -> {"code": str, "expires": float} — ожидаемые SMS-коды входа
-PENDING_CODES: dict[str, dict] = {}
-CODE_TTL = 300  # срок действия кода, секунд
+DM_HISTORY: dict[str, list[dict]] = {}
+MAX_HISTORY = 200
 
 PALETTE = [
     ft.Colors.BLUE_400, ft.Colors.ORANGE_400, ft.Colors.PURPLE_400,
@@ -47,7 +52,7 @@ BOT_COMMANDS = {
     "/whoami": "Ваше имя и телефон",
     "/stats": "Статистика активного чата",
     "/time": "Текущее время сервера",
-    "/ping": "Проверка связи (понг)",
+    "/ping": "Проверка связи",
     "/roll": "Случайное число 1–100",
     "/dice": "Бросок кубика 1–6",
     "/flip": "Орёл или решка",
@@ -59,7 +64,7 @@ BOT_COMMANDS = {
     "/weather <город>": "Погода через wttr.in",
     "/remind <сек> <текст>": "Напоминание через N секунд",
     "/nick <имя>": "Сменить отображаемое имя",
-    "/me <действие>": "Эмодзи-действие, /me машает рукой",
+    "/me <действие>": "Действие от третьего лица",
     "/clear": "Очистить ленту у себя",
 }
 
@@ -92,16 +97,19 @@ EIGHT_BALL = [
     "По моим данным — нет", "Очень сомнительно",
 ]
 
+REACTION_ICONS = [  # key, icon, активный цвет
+    ("like", ft.Icons.THUMB_UP, ACCENT),
+    ("heart", ft.Icons.FAVORITE, ft.Colors.RED_400),
+]
+
 
 # ============================================================
 # УТИЛИТЫ
 # ============================================================
 def normalize_phone(raw: str) -> str | None:
-    """Приводит телефон к виду +<digits>. Возвращает None, если невалиден."""
     digits = "".join(ch for ch in (raw or "") if ch.isdigit())
     if not digits:
         return None
-    # российские правила: 8... -> 7..., 10 цифр -> добить 7 спереди
     if len(digits) == 11 and digits[0] == "8":
         digits = "7" + digits[1:]
     if len(digits) == 10:
@@ -112,7 +120,6 @@ def normalize_phone(raw: str) -> str | None:
 
 
 def format_phone(p: str) -> str:
-    """Красивое отображение: +7 999 123-45-67."""
     d = p.lstrip("+")
     if len(d) == 11 and d.startswith("7"):
         return f"+7 {d[1:4]} {d[4:7]}-{d[7:9]}-{d[9:11]}"
@@ -120,7 +127,6 @@ def format_phone(p: str) -> str:
 
 
 def dm_topic(a: str, b: str) -> str:
-    """Общий топик для пары собеседников (порядок не важен)."""
     return "dm:" + "_".join(sorted([a, b]))
 
 
@@ -152,22 +158,17 @@ def today_iso() -> str:
     return date.today().isoformat()
 
 
-def safe_calc(expr: str):
-    """Безопасное вычисление арифметического выражения.
+def new_msg_id() -> str:
+    return uuid.uuid4().hex[:12]
 
-    Разрешены только числа и операции + - * / % // ** и унарные + -.
-    Любые имена, вызовы и атрибуты отбрасываются.
-    """
+
+def safe_calc(expr: str):
     allowed = {
-        ast.Add: lambda a, b: a + b,
-        ast.Sub: lambda a, b: a - b,
-        ast.Mult: lambda a, b: a * b,
-        ast.Div: lambda a, b: a / b,
-        ast.FloorDiv: lambda a, b: a // b,
-        ast.Mod: lambda a, b: a % b,
+        ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b,
+        ast.Mult: lambda a, b: a * b, ast.Div: lambda a, b: a / b,
+        ast.FloorDiv: lambda a, b: a // b, ast.Mod: lambda a, b: a % b,
         ast.Pow: lambda a, b: a ** b,
-        ast.UAdd: lambda a: +a,
-        ast.USub: lambda a: -a,
+        ast.UAdd: lambda a: +a, ast.USub: lambda a: -a,
     }
     node = ast.parse(expr, mode="eval")
 
@@ -186,14 +187,13 @@ def safe_calc(expr: str):
 
 
 def fetch_weather(city: str) -> str:
-    """Погода через wttr.in (без ключа). Бросает исключение при сбое сети."""
     url = "https://wttr.in/" + urllib.parse.quote(city) + "?format=j1&lang=ru"
     req = urllib.request.Request(url, headers={"User-Agent": "curl/8"})
     with urllib.request.urlopen(req, timeout=6) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     cur = data["current_condition"][0]
     desc = cur.get("lang_ru", [{"value": cur["weatherDesc"][0]["value"]}])[0]["value"]
-    return (f"{city}: {desc}, {cur['temp_C']}°C "
+    return (f"Погода, {city}: {desc}, {cur['temp_C']}°C "
             f"(ощущается {cur['FeelsLikeC']}°C), "
             f"влажность {cur['humidity']}%, ветер {cur['windspeedKmph']} км/ч")
 
@@ -206,9 +206,14 @@ class Message:
     user: str
     text: str
     timestamp: str
-    sender_phone: str = ""        # кто отправил (для выравнивания bubble)
-    kind: str = "message"         # message | system | me
+    sender_phone: str = ""
+    kind: str = "message"            # message | system | me
     date: str = ""
+    id: str = ""
+    reactions: dict = field(default_factory=dict)
+    reply_to_id: str = ""
+    reply_to_user: str = ""
+    reply_to_text: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> "Message":
@@ -220,26 +225,26 @@ class Message:
 # ОСНОВНОЕ ПРИЛОЖЕНИЕ
 # ============================================================
 def main(page: ft.Page) -> None:
-    page.title = "Flet Chat"
+    page.title = "Чат"
     page.padding = 0
     page.theme_mode = ft.ThemeMode.DARK
     page.bgcolor = ft.Colors.GREY_900
 
-    # --- состояние текущего пользователя ---
+    # --- состояние пользователя ---
     my_phone: list[str | None] = [None]
     my_name: list[str | None] = [None]
     my_session_id = page.session.id
     my_dm_topics: set[str] = set()
 
     # --- состояние UI ---
-    active_chat: list[str] = [LOBBY_KEY]          # "lobby" или телефон собеседника
-    unread: dict[str, int] = {}                    # chat_key -> непрочитано
+    active_chat: list[str] = [LOBBY_KEY]
+    unread: dict[str, int] = {}
     mobile_show_sidebar: list[bool] = [True]
     last_rendered_date: list[str] = [""]
     last_author: list[str] = [""]
     last_typing_sent = [0.0]
-
-    original_title = "Flet Chat"
+    rendered_msg_rows: dict[str, ft.Row] = {}   # msg_id -> строка реакций
+    reply_state: dict[str, str] = {"id": "", "user": "", "text": ""}
 
     # ============================================================
     # ШАПКА ЧАТА
@@ -252,8 +257,7 @@ def main(page: ft.Page) -> None:
     header_icon = ft.Container(
         content=ft.Icon(ft.Icons.PUBLIC, color=ft.Colors.WHITE, size=20),
         width=38, height=38, border_radius=12,
-        bgcolor=ft.Colors.GREEN_600,
-        alignment=ft.Alignment.CENTER,
+        bgcolor=ACCENT_MED, alignment=ft.Alignment.CENTER,
     )
 
     header_title = ft.Text("Общий чат", size=16,
@@ -264,12 +268,12 @@ def main(page: ft.Page) -> None:
     online_badge = ft.Container(
         content=ft.Row([
             ft.Container(width=8, height=8, border_radius=4,
-                         bgcolor=ft.Colors.GREEN_400),
+                         bgcolor=ONLINE_CLR),
             ft.Text("0 онлайн", size=11, color=ft.Colors.GREY_300),
         ], spacing=6, tight=True),
         padding=ft.Padding.symmetric(horizontal=10, vertical=4),
         border_radius=12,
-        bgcolor=ft.Colors.with_opacity(0.15, ft.Colors.GREEN_400),
+        bgcolor=ft.Colors.with_opacity(0.15, ONLINE_CLR),
     )
 
     # ---------- Меню команд ----------
@@ -346,7 +350,7 @@ def main(page: ft.Page) -> None:
     # ЛЕНТА СООБЩЕНИЙ
     # ============================================================
     chat_list = ft.ListView(
-        expand=True, spacing=6,
+        expand=True, spacing=4,
         padding=ft.Padding.symmetric(horizontal=16, vertical=16),
         auto_scroll=True,
     )
@@ -358,21 +362,18 @@ def main(page: ft.Page) -> None:
     )
 
     # ============================================================
-    # ПОЛЕ ВВОДА
+    # ПОЛЕ ВВОДА + ПРЕВЬЮ ОТВЕТА
     # ============================================================
     message_input = ft.TextField(
-        hint_text="Введите сообщение…",
+        hint_text="Сообщение…",
         expand=True,
         border_color=ft.Colors.GREY_700,
-        focused_border_color=ft.Colors.GREEN_400,
+        focused_border_color=ACCENT,
         bgcolor=ft.Colors.GREY_800,
         border_radius=22,
         content_padding=ft.Padding.symmetric(horizontal=16, vertical=12),
-        multiline=True,
-        min_lines=1,
-        max_lines=4,
-        shift_enter=True,
-        autofocus=True,
+        multiline=True, min_lines=1, max_lines=4,
+        shift_enter=True, autofocus=True,
     )
 
     char_counter = ft.Text("0/500", size=10, color=ft.Colors.GREY_600)
@@ -380,22 +381,43 @@ def main(page: ft.Page) -> None:
     send_btn = ft.Container(
         content=ft.Icon(ft.Icons.SEND_ROUNDED, color=ft.Colors.WHITE, size=20),
         width=44, height=44, border_radius=22,
-        bgcolor=ft.Colors.GREEN_600,
-        alignment=ft.Alignment.CENTER,
-        on_click=lambda e: send_message(),
-        ink=True,
+        bgcolor=ACCENT_MED, alignment=ft.Alignment.CENTER,
+        on_click=lambda e: send_message(), ink=True,
+    )
+
+    reply_preview_text = ft.Text("", size=12, color=ft.Colors.WHITE,
+                                 weight=ft.FontWeight.BOLD,
+                                 max_lines=1,
+                                 overflow=ft.TextOverflow.ELLIPSIS)
+
+    def cancel_reply(update: bool = True) -> None:
+        reply_state.update({"id": "", "user": "", "text": ""})
+        reply_bar.visible = False
+        if update:
+            page.update()
+
+    reply_bar = ft.Container(
+        content=ft.Row([
+            ft.Container(width=3, height=26, bgcolor=ACCENT, border_radius=2),
+            ft.Column([
+                ft.Text("Ответ", size=10, color=ft.Colors.GREY_500),
+                reply_preview_text,
+            ], spacing=0, expand=True),
+            ft.IconButton(ft.Icons.CLOSE, icon_size=16,
+                          icon_color=ft.Colors.GREY_400,
+                          tooltip="Отменить ответ", on_click=lambda e: cancel_reply()),
+        ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        padding=ft.Padding.symmetric(horizontal=14, vertical=4),
+        bgcolor=ft.Colors.GREY_900,
+        border=ft.Border.only(top=ft.BorderSide(1, ft.Colors.GREY_800)),
+        visible=False,
     )
 
     input_bar = ft.Container(
         content=ft.Column([
-            ft.Row([
-                message_input,
-                send_btn,
-            ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.END),
-            ft.Row([
-                ft.Container(expand=True),
-                char_counter,
-            ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Row([message_input, send_btn], spacing=8,
+                   vertical_alignment=ft.CrossAxisAlignment.END),
+            ft.Row([ft.Container(expand=True), char_counter], spacing=8),
         ], spacing=4),
         padding=ft.Padding.symmetric(horizontal=14, vertical=8),
         bgcolor=ft.Colors.GREY_900,
@@ -404,17 +426,14 @@ def main(page: ft.Page) -> None:
 
     chat_pane = ft.Container(
         content=ft.Column([
-            header,
-            chat_list,
-            typing_status,
-            input_bar,
+            header, chat_list, typing_status, reply_bar, input_bar,
         ], expand=True, spacing=0),
         expand=True,
         bgcolor=ft.Colors.GREY_900,
     )
 
     # ============================================================
-    # БОКОВАЯ ПАНЕЛЬ (профиль + список чатов)
+    # АВАТАРЫ
     # ============================================================
     def make_avatar(name: str, key: str, size: int = 36) -> ft.Container:
         color = ft.Colors.GREY_500
@@ -427,6 +446,19 @@ def main(page: ft.Page) -> None:
             bgcolor=color, alignment=ft.Alignment.CENTER,
         )
 
+    def make_avatar_with_status(name: str, key: str, online: bool,
+                                 size: int = 36) -> ft.Control:
+        base = make_avatar(name, key, size=size)
+        if not online:
+            return base
+        dot = ft.Container(
+            width=size // 4, height=size // 4, border_radius=size // 8,
+            bgcolor=ONLINE_CLR,
+            border=ft.Border.all(2, ft.Colors.GREY_900),
+            right=0, bottom=0,
+        )
+        return ft.Stack([base, dot], width=size, height=size)
+
     profile_card = ft.Container(
         content=ft.Row([
             make_avatar("Я", "self", size=40),
@@ -435,18 +467,17 @@ def main(page: ft.Page) -> None:
                         color=ft.Colors.WHITE),
                 ft.Text("не авторизован", size=11, color=ft.Colors.GREY_400),
             ], spacing=0, expand=True),
-            ft.Container(width=8, height=8, border_radius=4,
-                         bgcolor=ft.Colors.GREEN_400),
+            ft.Container(width=8, height=8, border_radius=4, bgcolor=ONLINE_CLR),
         ], spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         padding=ft.Padding.symmetric(horizontal=14, vertical=14),
-        bgcolor=ft.Colors.with_opacity(0.08, ft.Colors.GREEN_400),
+        bgcolor=ft.Colors.with_opacity(0.08, ACCENT),
         border_radius=12,
     )
 
     chats_list = ft.Column(spacing=2, expand=True, scroll=ft.ScrollMode.AUTO)
 
     sidebar_header = ft.Row([
-        ft.Icon(ft.Icons.FORUM, color=ft.Colors.GREEN_400, size=18),
+        ft.Icon(ft.Icons.FORUM, color=ACCENT, size=18),
         ft.Text("Чаты", size=12, weight=ft.FontWeight.BOLD,
                 color=ft.Colors.GREY_400),
         ft.Container(expand=True),
@@ -455,16 +486,83 @@ def main(page: ft.Page) -> None:
 
     sidebar_col = ft.Container(
         content=ft.Column([
-            profile_card,
-            sidebar_header,
+            profile_card, sidebar_header,
             ft.Divider(height=1, thickness=1, color=ft.Colors.GREY_800),
             chats_list,
         ], spacing=8),
-        width=280,
+        width=300,
         padding=ft.Padding.only(left=12, right=8, top=12, bottom=12),
         bgcolor=ft.Colors.GREY_900,
         border=ft.Border.only(right=ft.BorderSide(1, ft.Colors.GREY_800)),
     )
+
+    # ============================================================
+    # РЕАКЦИИ И ДЕЙСТВИЯ НА СООБЩЕНИЕ
+    # ============================================================
+    def fill_reactions(row: ft.Row, reactions: dict, msg_id: str) -> None:
+        row.controls.clear()
+        for key, icon, col in REACTION_ICONS:
+            phones = (reactions or {}).get(key, [])
+            if not phones:
+                continue
+            active = bool(my_phone[0]) and my_phone[0] in phones
+            row.controls.append(ft.Container(
+                content=ft.Row([
+                    ft.Icon(icon, size=12,
+                            color=col if active else ft.Colors.GREY_400),
+                    ft.Text(str(len(phones)), size=10, color=ft.Colors.WHITE),
+                ], spacing=3, tight=True),
+                padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                border_radius=12,
+                bgcolor=ft.Colors.with_opacity(0.25, col) if active
+                        else ft.Colors.GREY_700,
+                on_click=lambda e, k=key: toggle_reaction(msg_id, k),
+                ink=True,
+            ))
+        row.visible = bool(row.controls)
+
+    def toggle_reaction(msg_id: str, key: str) -> None:
+        if not my_phone[0] or not msg_id:
+            return
+        k = active_chat[0]
+        topic = LOBBY_KEY if k == LOBBY_KEY else dm_topic(my_phone[0], k)
+        page.pubsub.send_all_on_topic(topic, {
+            "type": "reaction", "msg_id": msg_id, "emoji": key,
+            "phone": my_phone[0],
+        })
+
+    def set_reply(msg: Message) -> None:
+        reply_state.update({
+            "id": msg.id, "user": msg.user,
+            "text": (msg.text or "")[:60],
+        })
+        reply_preview_text.value = f"{msg.user}: {reply_state['text']}"
+        reply_bar.visible = True
+        page.update()
+
+    def make_msg_menu(msg: Message) -> ft.PopupMenuButton:
+        def item(icon, text, on_click, icon_color=ft.Colors.WHITE):
+            return ft.PopupMenuItem(
+                content=ft.Row([
+                    ft.Icon(icon, size=14, color=icon_color),
+                    ft.Text(text, size=12, color=ft.Colors.WHITE),
+                ], spacing=8, tight=True),
+                on_click=on_click,
+            )
+        return ft.PopupMenuButton(
+            icon=ft.Icons.MORE_HORIZ,
+            icon_size=14,
+            icon_color=ft.Colors.GREY_600,
+            tooltip="Действия",
+            items=[
+                item(ft.Icons.REPLY, "Ответить", lambda e: set_reply(msg)),
+                item(ft.Icons.THUMB_UP, "Нравится",
+                     lambda e: toggle_reaction(msg.id, "like")),
+                item(ft.Icons.FAVORITE, "Сердце",
+                     lambda e: toggle_reaction(msg.id, "heart"),
+                     icon_color=ft.Colors.RED_400),
+            ],
+        )
 
     # ============================================================
     # ОТРИСОВКА СООБЩЕНИЙ
@@ -506,11 +604,31 @@ def main(page: ft.Page) -> None:
             return
 
         nick_color = get_user_color(msg.sender_phone or msg.user)
-
         show_header = last_author[0] != msg.sender_phone
         last_author[0] = msg.sender_phone
 
         bubble_children = []
+
+        # цитата ответа
+        if msg.reply_to_id:
+            bubble_children.append(
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text(msg.reply_to_user or "Сообщение",
+                                size=11, weight=ft.FontWeight.BOLD,
+                                color=ACCENT),
+                        ft.Text(msg.reply_to_text or "", size=11,
+                                color=ft.Colors.GREY_400, max_lines=1,
+                                overflow=ft.TextOverflow.ELLIPSIS),
+                    ], spacing=0, tight=True),
+                    padding=ft.Padding.only(left=8, top=2, bottom=2, right=4),
+                    border=ft.Border.only(left=ft.BorderSide(2, ACCENT)),
+                    border_radius=4,
+                    margin=ft.Margin.only(bottom=4),
+                )
+            )
+
+        # шапка (автор + время)
         if show_header:
             header_controls = []
             if is_own:
@@ -518,46 +636,54 @@ def main(page: ft.Page) -> None:
                     content=ft.Text("Вы", size=9, color=ft.Colors.WHITE,
                                     weight=ft.FontWeight.BOLD),
                     padding=ft.Padding.symmetric(horizontal=5, vertical=1),
-                    border_radius=6,
-                    bgcolor=ft.Colors.GREEN_600,
+                    border_radius=6, bgcolor=ACCENT_MED,
                 ))
             header_controls.append(ft.Text(
                 msg.user, weight=ft.FontWeight.BOLD, size=12,
-                color=ft.Colors.GREEN_400 if is_own else nick_color))
+                color=ACCENT if is_own else nick_color))
             header_controls.append(ft.Text(msg.timestamp, size=10,
                                            color=ft.Colors.GREY_500))
             bubble_children.append(ft.Row(header_controls, spacing=8, tight=True))
+
         bubble_children.append(
             ft.Text(msg.text, size=14, color=ft.Colors.WHITE, selectable=True)
         )
 
+        # строка реакций (всегда создаётся, заполняется по наличию)
+        reactions_row = ft.Row([], spacing=4, tight=True, visible=False)
+        fill_reactions(reactions_row, msg.reactions, msg.id)
+        if msg.id:
+            rendered_msg_rows[msg.id] = reactions_row
+        bubble_children.append(reactions_row)
+
         bubble = ft.Container(
             content=ft.Column(bubble_children, spacing=2, tight=True),
-            bgcolor=ft.Colors.GREEN_800 if is_own else ft.Colors.GREY_800,
+            bgcolor=ACCENT_DEEP if is_own else ft.Colors.GREY_800,
             padding=ft.Padding.symmetric(horizontal=14, vertical=10),
             border_radius=ft.BorderRadius.only(
-                top_left=16, top_right=16,
-                bottom_left=4, bottom_right=16,
+                top_left=16, top_right=16, bottom_left=4, bottom_right=16,
             ),
-            max_width=460,
-            shadow=ft.BoxShadow(blur_radius=6, spread_radius=0,
-                                color=ft.Colors.with_opacity(0.2, ft.Colors.BLACK),
+            max_width=480,
+            shadow=ft.BoxShadow(blur_radius=4, spread_radius=0,
+                                color=ft.Colors.with_opacity(0.15, ft.Colors.BLACK),
                                 offset=ft.Offset(0, 1)),
         )
 
-        # ВСЕ сообщения выровнены слева: аватар + пузырь + растяжка.
-        # Свои сообщения отличает зелёный пузырь и бейдж «Вы».
-        avatar = (make_avatar(msg.user, msg.sender_phone or msg.user, size=32)
+        avatar = (make_avatar_with_status(msg.user, msg.sender_phone or msg.user,
+                                           online=False, size=32)
                   if show_header else ft.Container(width=32))
+        menu = make_msg_menu(msg) if msg.kind == "message" else ft.Container()
+
         row = ft.Row(
-            [avatar, bubble, ft.Container(expand=True)],
-            spacing=8,
+            [avatar, bubble, menu],
+            spacing=6,
             vertical_alignment=ft.CrossAxisAlignment.START,
         )
         chat_list.controls.append(row)
 
     def render_active_chat() -> None:
         chat_list.controls.clear()
+        rendered_msg_rows.clear()
         last_rendered_date[0] = ""
         last_author[0] = ""
         key = active_chat[0]
@@ -566,8 +692,18 @@ def main(page: ft.Page) -> None:
         else:
             topic = dm_topic(my_phone[0], key) if my_phone[0] else ""
             msgs = DM_HISTORY.get(topic, [])
-        for m in msgs:
-            add_message_to_ui(Message.from_dict(m))
+        if not msgs:
+            chat_list.controls.append(
+                ft.Container(
+                    content=ft.Text("Нет сообщений. Начните диалог!",
+                                    size=12, color=ft.Colors.GREY_600),
+                    alignment=ft.Alignment.CENTER,
+                    padding=ft.Padding.symmetric(vertical=40),
+                )
+            )
+        else:
+            for m in msgs:
+                add_message_to_ui(Message.from_dict(m))
         typing_status.visible = False
 
     # ============================================================
@@ -578,7 +714,7 @@ def main(page: ft.Page) -> None:
         if key == LOBBY_KEY:
             header_icon.content = ft.Icon(ft.Icons.PUBLIC,
                                           color=ft.Colors.WHITE, size=20)
-            header_icon.bgcolor = ft.Colors.GREEN_600
+            header_icon.bgcolor = ACCENT_MED
             header_title.value = "Общий чат"
             header_subtitle.value = "Все участники"
         else:
@@ -604,89 +740,95 @@ def main(page: ft.Page) -> None:
             col.controls[0].value = my_name[0]
             col.controls[1].value = format_phone(my_phone[0])
 
+    def last_msg_for_key(key: str):
+        if key == LOBBY_KEY:
+            hist = LOBBY_HISTORY
+        else:
+            topic = dm_topic(my_phone[0], key) if my_phone[0] else ""
+            hist = DM_HISTORY.get(topic, [])
+        if not hist:
+            return None, None
+        m = hist[-1]
+        txt = m.get("text", "")
+        if m.get("kind") == "me":
+            preview = f"{m.get('user', '')} {txt}"
+        elif m.get("sender_phone") == my_phone[0]:
+            preview = "Вы: " + txt
+        else:
+            preview = txt
+        preview = (preview[:30] + "…") if len(preview) > 30 else preview
+        return preview, m.get("timestamp", "")
+
     def build_sidebar_chats() -> None:
         chats_list.controls.clear()
         key = active_chat[0]
 
-        # Общий чат
-        def lobby_row():
-            active = key == LOBBY_KEY
+        def chat_row(icon_or_avatar, title, preview, time_text, n_unread,
+                     active, on_click):
+            badge = (ft.Container(
+                content=ft.Text(str(n_unread), size=10, color=ft.Colors.WHITE,
+                                weight=ft.FontWeight.BOLD),
+                padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                border_radius=10, bgcolor=ACCENT_MED,
+            ) if n_unread > 0 else ft.Container(width=10))
             return ft.Container(
                 content=ft.Row([
-                    ft.Container(
-                        content=ft.Icon(ft.Icons.PUBLIC,
-                                        color=ft.Colors.WHITE, size=18),
-                        width=36, height=36, border_radius=18,
-                        bgcolor=ft.Colors.GREEN_600,
-                        alignment=ft.Alignment.CENTER,
-                    ),
+                    icon_or_avatar,
                     ft.Column([
-                        ft.Text("Общий чат", size=13,
-                                weight=ft.FontWeight.BOLD,
-                                color=ft.Colors.WHITE),
-                        ft.Text("Все участники", size=11,
-                                color=ft.Colors.GREY_500),
-                    ], spacing=0, expand=True),
+                        ft.Text(title, size=13, weight=ft.FontWeight.BOLD,
+                                color=ft.Colors.WHITE, max_lines=1,
+                                overflow=ft.TextOverflow.ELLIPSIS),
+                        ft.Text(preview, size=11, color=ft.Colors.GREY_500,
+                                max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+                                expand=True),
+                    ], spacing=1, expand=True),
+                    ft.Column([
+                        ft.Text(time_text, size=10, color=ft.Colors.GREY_500),
+                        badge,
+                    ], spacing=4,
+                       horizontal_alignment=ft.CrossAxisAlignment.END),
                 ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 padding=ft.Padding.symmetric(horizontal=10, vertical=8),
                 border_radius=10,
-                bgcolor=ft.Colors.with_opacity(0.18, ft.Colors.GREEN_400)
-                if active else None,
-                on_click=lambda e: open_chat(LOBBY_KEY),
-                ink=True,
+                bgcolor=ft.Colors.with_opacity(0.18, ACCENT) if active else None,
+                on_click=on_click, ink=True,
             )
 
-        chats_list.controls.append(lobby_row())
+        # Общий чат
+        l_preview, l_time = last_msg_for_key(LOBBY_KEY)
+        chats_list.controls.append(chat_row(
+            ft.Container(content=ft.Icon(ft.Icons.PUBLIC,
+                                         color=ft.Colors.WHITE, size=18),
+                         width=36, height=36, border_radius=18,
+                         bgcolor=ACCENT_MED, alignment=ft.Alignment.CENTER),
+            "Общий чат", l_preview or "Нет сообщений", l_time or "",
+            unread.get(LOBBY_KEY, 0), key == LOBBY_KEY,
+            lambda e: open_chat(LOBBY_KEY),
+        ))
 
-        # Контакты онлайн
+        # Контакты
         others = [p for p in PARTICIPANTS if p != my_phone[0]]
         if others:
             chats_list.controls.append(
                 ft.Container(
-                    content=ft.Text(f"Контакты онлайн · {len(others)}",
+                    content=ft.Text(f"Контакты · {len(others)}",
                                     size=11, color=ft.Colors.GREY_500),
                     padding=ft.Padding.only(left=10, top=10, bottom=4),
                 )
             )
-
-        for phone in sorted(others, key=lambda p: PARTICIPANTS[p]["name"].lower()):
-            info = PARTICIPANTS[phone]
-            name = info.get("name", "?")
-            active = key == phone
-            n_unread = unread.get(phone, 0)
-
-            badge = (ft.Container(
-                content=ft.Text(str(n_unread), size=10,
-                                color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD),
-                padding=ft.Padding.symmetric(horizontal=6, vertical=2),
-                border_radius=10,
-                bgcolor=ft.Colors.RED_400,
-            ) if n_unread > 0 else ft.Container())
-
-            chats_list.controls.append(
-                ft.Container(
-                    content=ft.Row([
-                        make_avatar(name, phone, size=36),
-                        ft.Column([
-                            ft.Text(name, size=13,
-                                    weight=ft.FontWeight.BOLD,
-                                    color=ft.Colors.WHITE),
-                            ft.Text(format_phone(phone), size=11,
-                                    color=ft.Colors.GREY_500),
-                        ], spacing=0, expand=True),
-                        badge,
-                    ], spacing=10,
-                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    padding=ft.Padding.symmetric(horizontal=10, vertical=8),
-                    border_radius=10,
-                    bgcolor=ft.Colors.with_opacity(0.18, ft.Colors.GREEN_400)
-                    if active else None,
-                    on_click=lambda e, p=phone: open_chat(p),
-                    ink=True,
-                )
-            )
-
-        if not others:
+            for phone in sorted(others,
+                                key=lambda p: PARTICIPANTS[p]["name"].lower()):
+                info = PARTICIPANTS[phone]
+                name = info.get("name", "?")
+                c_preview, c_time = last_msg_for_key(phone)
+                chats_list.controls.append(chat_row(
+                    make_avatar_with_status(name, phone,
+                                            online=phone in PARTICIPANTS, size=36),
+                    name, c_preview or format_phone(phone), c_time or "",
+                    unread.get(phone, 0), key == phone,
+                    lambda e, p=phone: open_chat(p),
+                ))
+        else:
             chats_list.controls.append(
                 ft.Container(
                     content=ft.Text("Пока никого нет в сети.\n"
@@ -702,6 +844,7 @@ def main(page: ft.Page) -> None:
     def open_chat(key: str) -> None:
         active_chat[0] = key
         unread[key] = 0
+        cancel_reply(update=False)
         render_active_chat()
         update_header()
         build_sidebar_chats()
@@ -710,11 +853,11 @@ def main(page: ft.Page) -> None:
         page.update()
 
     def apply_layout() -> None:
-        is_desktop = (page.width or 0) >= 720
+        is_desktop = (page.width or 0) >= 760
         back_btn.visible = False
         if is_desktop:
             sidebar_col.visible = True
-            sidebar_col.width = 280
+            sidebar_col.width = 300
             sidebar_col.expand = False
             chat_pane.visible = True
         else:
@@ -731,29 +874,23 @@ def main(page: ft.Page) -> None:
     page.on_resize = on_resize
 
     # ============================================================
-    # ПРИСУТСТВИЕ (presence через топик "presence")
+    # ПРИСУТСТВИЕ
     # ============================================================
     def announce_hello() -> None:
         page.pubsub.send_all_on_topic("presence", {
-            "type": "hello",
-            "phone": my_phone[0],
-            "name": my_name[0],
+            "type": "hello", "phone": my_phone[0], "name": my_name[0],
         })
 
     def announce_here() -> None:
         page.pubsub.send_all_on_topic("presence", {
-            "type": "here",
-            "phone": my_phone[0],
-            "name": my_name[0],
+            "type": "here", "phone": my_phone[0], "name": my_name[0],
         })
 
     def announce_bye() -> None:
         if not my_phone[0]:
             return
         page.pubsub.send_all_on_topic("presence", {
-            "type": "bye",
-            "phone": my_phone[0],
-            "name": my_name[0],
+            "type": "bye", "phone": my_phone[0], "name": my_name[0],
         })
 
     def on_presence(topic: str, data: dict) -> None:
@@ -762,7 +899,6 @@ def main(page: ft.Page) -> None:
         name = data.get("name", "?")
         if not my_phone[0] or not phone or phone == my_phone[0]:
             return
-
         if t in ("hello", "here"):
             PARTICIPANTS[phone] = {"name": name,
                                    "session_id": data.get("session_id", "")}
@@ -776,7 +912,6 @@ def main(page: ft.Page) -> None:
             build_sidebar_chats()
             update_header()
             page.update()
-
         elif t == "bye":
             PARTICIPANTS.pop(phone, None)
             update_online_count()
@@ -785,7 +920,7 @@ def main(page: ft.Page) -> None:
             page.update()
 
     # ============================================================
-    # ПРИЁМ СООБЩЕНИЙ (лобби + личные)
+    # ПРИЁМ СООБЩЕНИЙ (лобби + личные + реакции)
     # ============================================================
     def chat_key_for_topic(topic: str) -> str:
         if topic == LOBBY_KEY:
@@ -803,10 +938,39 @@ def main(page: ft.Page) -> None:
         return DM_HISTORY.setdefault(topic, [])
 
     def on_chat_message(topic: str, data: dict) -> None:
-        # до авторизации сообщения не обрабатываем
         if not my_phone[0]:
             return
-        # typing-события
+
+        # реакция на сообщение
+        if data.get("type") == "reaction":
+            msg_id = data.get("msg_id")
+            emoji = data.get("emoji")
+            phone = data.get("phone", "")
+            if not msg_id or not emoji:
+                return
+            key = chat_key_for_topic(topic)
+            hist = history_for_key(key)
+            for m in hist:
+                if m.get("id") == msg_id:
+                    reacts = m.setdefault("reactions", {})
+                    lst = reacts.setdefault(emoji, [])
+                    if phone in lst:
+                        lst.remove(phone)
+                    else:
+                        lst.append(phone)
+                    if not lst:
+                        reacts.pop(emoji)
+                    row = rendered_msg_rows.get(msg_id)
+                    if row is not None and active_chat[0] == key:
+                        fill_reactions(row, reacts, msg_id)
+                        page.update()
+                    elif active_chat[0] != key:
+                        build_sidebar_chats()
+                        page.update()
+                    break
+            return
+
+        # индикатор набора
         if data.get("type") == "typing":
             sender = data.get("name", "?")
             sender_phone = data.get("sender_phone", "")
@@ -816,8 +980,8 @@ def main(page: ft.Page) -> None:
             if active_chat[0] == key:
                 typing_status.content = ft.Row([
                     make_avatar(sender, sender_phone, size=18),
-                    ft.Text(f"{sender} печатает…", size=11,
-                            italic=True, color=ft.Colors.GREY_400),
+                    ft.Text(f"{sender} печатает…", size=11, italic=True,
+                            color=ft.Colors.GREY_400),
                 ], spacing=6, tight=True)
                 typing_status.visible = True
                 page.update()
@@ -825,14 +989,18 @@ def main(page: ft.Page) -> None:
 
         # обычное сообщение
         msg = {
+            "id": data.get("id") or new_msg_id(),
             "user": data.get("user", "?"),
             "text": data.get("text", ""),
             "timestamp": data.get("timestamp", now_time()),
             "sender_phone": data.get("sender_phone", ""),
             "kind": data.get("kind", "message"),
             "date": data.get("date", today_iso()),
+            "reactions": data.get("reactions", {}),
+            "reply_to_id": data.get("reply_to_id", ""),
+            "reply_to_user": data.get("reply_to_user", ""),
+            "reply_to_text": data.get("reply_to_text", ""),
         }
-
         key = chat_key_for_topic(topic)
         history = history_for_key(key)
         history.append(msg)
@@ -845,23 +1013,22 @@ def main(page: ft.Page) -> None:
         else:
             unread[key] = unread.get(key, 0) + 1
             build_sidebar_chats()
-
         page.update()
-
-    # подписки на presence и лобби выполняются после входа (см. subscribe_core),
-    # чтобы не обрабатывать чужое присутствие до авторизации
 
     # ============================================================
     # БОТ / КОМАНДЫ
     # ============================================================
     def bot_send(text: str, kind: str = "message") -> None:
         payload = {
+            "id": new_msg_id(),
             "user": BOT_NAME,
             "text": text,
             "timestamp": now_time(),
             "sender_phone": BOT_NAME,
             "kind": kind,
             "date": today_iso(),
+            "reactions": {},
+            "reply_to_id": "", "reply_to_user": "", "reply_to_text": "",
         }
         key = active_chat[0]
         if key == LOBBY_KEY:
@@ -875,10 +1042,12 @@ def main(page: ft.Page) -> None:
 
     def add_system_locally(text: str) -> None:
         msg = {
+            "id": new_msg_id(),
             "user": "Система", "text": text,
-            "timestamp": now_time(),
-            "sender_phone": "", "kind": "system",
-            "date": today_iso(),
+            "timestamp": now_time(), "sender_phone": "",
+            "kind": "system", "date": today_iso(),
+            "reactions": {}, "reply_to_id": "", "reply_to_user": "",
+            "reply_to_text": "",
         }
         history = history_for_key(active_chat[0])
         history.append(msg)
@@ -890,7 +1059,6 @@ def main(page: ft.Page) -> None:
             return False
         cmd, _, arg = low.partition(" ")
         arg = arg.strip()
-        # оригинальный регистр для команд, чувствительных к тексту (/me, /nick, /weather)
         raw_arg = text.strip()[len(cmd):].strip()
 
         if cmd == "/help":
@@ -919,34 +1087,34 @@ def main(page: ft.Page) -> None:
             top_s = ", ".join(f"{n} ({c})" for n, c in top) or "—"
             label = ("Общий чат" if active_chat[0] == LOBBY_KEY
                      else "Личный чат")
-            bot_send(f"📊 {label}: сообщений {total}, авторов {len(authors)}. "
-                     f"Топ: {top_s}", kind="system")
+            bot_send(f"Статистика · {label}: сообщений {total}, "
+                     f"авторов {len(authors)}. Топ: {top_s}", kind="system")
         elif cmd == "/time":
             bot_send(f"Время сервера: "
                      f"{datetime.now().strftime('%H:%M:%S')}", kind="system")
         elif cmd == "/ping":
-            bot_send("🏓 понг!", kind="system")
+            bot_send("понг", kind="system")
         elif cmd == "/roll":
-            bot_send(f"🎲 Выпало: {random.randint(1, 100)}")
+            bot_send(f"Выпало: {random.randint(1, 100)}")
         elif cmd == "/dice":
-            bot_send(f"🎲 Кубик: {random.randint(1, 6)}")
+            bot_send(f"Кубик: {random.randint(1, 6)}")
         elif cmd == "/flip":
-            bot_send(f"🪙 {random.choice(['Орёл', 'Решка'])}")
+            bot_send(random.choice(["Орёл", "Решка"]))
         elif cmd == "/8ball":
             if not arg:
                 add_system_locally("Использование: /8ball <вопрос>")
                 page.update()
             else:
-                bot_send(f"🎱 {random.choice(EIGHT_BALL)}", kind="system")
+                bot_send(random.choice(EIGHT_BALL), kind="system")
         elif cmd == "/choose":
             opts = [o for o in arg.split() if o]
             if len(opts) < 2:
                 add_system_locally("Использование: /choose a b c …")
                 page.update()
             else:
-                bot_send(f"👉 Выбрано: {random.choice(opts)}", kind="system")
+                bot_send(f"Выбрано: {random.choice(opts)}", kind="system")
         elif cmd == "/joke":
-            bot_send(f"😄 {random.choice(JOKES)}", kind="system")
+            bot_send(random.choice(JOKES), kind="system")
         elif cmd == "/quote":
             bot_send(random.choice(QUOTES), kind="system")
         elif cmd == "/calc":
@@ -956,7 +1124,7 @@ def main(page: ft.Page) -> None:
             else:
                 try:
                     res = safe_calc(arg)
-                    bot_send(f"🧮 {arg} = {res}", kind="system")
+                    bot_send(f"{arg} = {res}", kind="system")
                 except ZeroDivisionError:
                     add_system_locally("Деление на ноль!")
                     page.update()
@@ -970,7 +1138,7 @@ def main(page: ft.Page) -> None:
                 add_system_locally("Использование: /weather <город>")
                 page.update()
             else:
-                add_system_locally(f"🌤 Запрашиваю погоду: {city}…")
+                add_system_locally(f"Запрашиваю погоду: {city}…")
                 page.update()
 
                 def _w(c=city):
@@ -999,7 +1167,7 @@ def main(page: ft.Page) -> None:
                     page.update()
                     return True
                 rem_text = parts[1]
-                add_system_locally(f"⏰ Напомню через {secs}с: {rem_text}")
+                add_system_locally(f"Напомню через {secs}с: {rem_text}")
                 page.update()
                 key = active_chat[0]
                 topic = (LOBBY_KEY if key == LOBBY_KEY
@@ -1007,12 +1175,16 @@ def main(page: ft.Page) -> None:
 
                 def _fire():
                     payload = {
+                        "id": new_msg_id(),
                         "user": BOT_NAME,
-                        "text": f"⏰ Напоминание для {my_name[0]}: {rem_text}",
+                        "text": f"Напоминание для {my_name[0]}: {rem_text}",
                         "timestamp": now_time(),
                         "sender_phone": BOT_NAME,
                         "kind": "system",
                         "date": today_iso(),
+                        "reactions": {},
+                        "reply_to_id": "", "reply_to_user": "",
+                        "reply_to_text": "",
                     }
                     try:
                         page.pubsub.send_all_on_topic(topic, payload)
@@ -1039,7 +1211,7 @@ def main(page: ft.Page) -> None:
                 add_system_locally("Использование: /me <действие>")
                 page.update()
             else:
-                bot_send(f"✨ *{my_name[0]} {raw_arg}*", kind="me")
+                bot_send(f"{my_name[0]} {raw_arg}", kind="me")
         elif cmd == "/clear":
             history = history_for_key(active_chat[0])
             history.clear()
@@ -1054,7 +1226,6 @@ def main(page: ft.Page) -> None:
         if needs_arg:
             message_input.value = cmd + " "
             on_input_change()
-            message_input.focus()
             page.update()
         else:
             handle_bot_command(cmd)
@@ -1077,16 +1248,20 @@ def main(page: ft.Page) -> None:
                 page.update()
             return
 
-        key = active_chat[0]
         payload = {
+            "id": new_msg_id(),
             "user": my_name[0],
             "text": text,
             "timestamp": now_time(),
             "sender_phone": my_phone[0],
             "kind": "message",
             "date": today_iso(),
+            "reactions": {},
+            "reply_to_id": reply_state["id"],
+            "reply_to_user": reply_state["user"],
+            "reply_to_text": reply_state["text"],
         }
-
+        key = active_chat[0]
         if key == LOBBY_KEY:
             page.pubsub.send_all_on_topic(LOBBY_KEY, payload)
         else:
@@ -1099,6 +1274,7 @@ def main(page: ft.Page) -> None:
         message_input.value = ""
         char_counter.value = f"0/{MAX_MSG_LEN}"
         char_counter.color = ft.Colors.GREY_600
+        cancel_reply(update=False)
         page.update()
 
     message_input.on_submit = send_message
@@ -1108,7 +1284,6 @@ def main(page: ft.Page) -> None:
         char_counter.value = f"{len(val)}/{MAX_MSG_LEN}"
         char_counter.color = (ft.Colors.RED_400 if len(val) > MAX_MSG_LEN
                               else ft.Colors.GREY_600)
-
         if not my_phone[0] or not val.strip() or val.startswith("/"):
             page.update()
             return
@@ -1120,8 +1295,7 @@ def main(page: ft.Page) -> None:
         key = active_chat[0]
         topic = LOBBY_KEY if key == LOBBY_KEY else dm_topic(my_phone[0], key)
         page.pubsub.send_others_on_topic(topic, {
-            "type": "typing",
-            "name": my_name[0],
+            "type": "typing", "name": my_name[0],
             "sender_phone": my_phone[0],
         })
         page.update()
@@ -1140,26 +1314,21 @@ def main(page: ft.Page) -> None:
     # ============================================================
     name_field = ft.TextField(
         label="Имя (необязательно)", width=300,
-        border_color=ft.Colors.GREEN_400,
-        focused_border_color=ft.Colors.GREEN_400,
+        border_color=ACCENT, focused_border_color=ACCENT,
         bgcolor=ft.Colors.GREY_900,
     )
     phone_field = ft.TextField(
         label="Номер телефона", width=300,
         hint_text="+7 999 123-45-67",
-        border_color=ft.Colors.GREEN_400,
-        focused_border_color=ft.Colors.GREEN_400,
+        border_color=ACCENT, focused_border_color=ACCENT,
         bgcolor=ft.Colors.GREY_900,
         keyboard_type=ft.KeyboardType.PHONE,
     )
     code_field = ft.TextField(
-        label="Код из SMS", width=300,
-        hint_text="000000",
-        border_color=ft.Colors.GREEN_400,
-        focused_border_color=ft.Colors.GREEN_400,
+        label="Код из SMS", width=300, hint_text="000000",
+        border_color=ACCENT, focused_border_color=ACCENT,
         bgcolor=ft.Colors.GREY_900,
-        keyboard_type=ft.KeyboardType.NUMBER,
-        max_length=6,
+        keyboard_type=ft.KeyboardType.NUMBER, max_length=6,
     )
     error_text = ft.Text("", size=12, color=ft.Colors.RED_400, visible=False)
     code_notice = ft.Container(
@@ -1172,7 +1341,7 @@ def main(page: ft.Page) -> None:
     enter_dialog = ft.AlertDialog(
         modal=True,
         title=ft.Row([
-            ft.Icon(ft.Icons.SMS, color=ft.Colors.GREEN_400),
+            ft.Icon(ft.Icons.LOCK_PERSON, color=ACCENT),
             ft.Text("Вход в чат", weight=ft.FontWeight.BOLD,
                     color=ft.Colors.WHITE),
         ], spacing=8),
@@ -1181,12 +1350,10 @@ def main(page: ft.Page) -> None:
         bgcolor=ft.Colors.GREY_800,
     )
 
-    # состояние входа и флаг базовых подписок
     pending = {"phone": None, "name": "", "code": None, "expires": 0.0}
     core_subscribed = [False]
 
     def subscribe_core() -> None:
-        """Подписка на presence и лобби — только после авторизации."""
         if core_subscribed[0]:
             return
         page.pubsub.subscribe_topic("presence", on_presence)
@@ -1201,28 +1368,24 @@ def main(page: ft.Page) -> None:
                 ft.Text("Введите номер телефона — на него придёт SMS-код. "
                         "Имя можно оставить пустым.",
                         size=12, color=ft.Colors.GREY_400),
-                name_field,
-                phone_field,
-                error_text,
+                name_field, phone_field, error_text,
             ], tight=True, spacing=10)
             enter_dialog.actions = [
                 ft.TextButton("Получить код", on_click=send_code,
-                              style=ft.ButtonStyle(color=ft.Colors.GREEN_400)),
+                              style=ft.ButtonStyle(color=ACCENT)),
             ]
             name_field.autofocus = True
         else:
             enter_dialog.content = ft.Column([
-                ft.Text(f"📞 Код отправлен на {format_phone(pending['phone'])}",
+                ft.Text(f"Код отправлен на {format_phone(pending['phone'])}",
                         size=12, color=ft.Colors.GREY_400),
-                code_notice,
-                code_field,
-                error_text,
+                code_notice, code_field, error_text,
             ], tight=True, spacing=10)
             enter_dialog.actions = [
                 ft.TextButton("Назад", on_click=back_to_step1),
                 ft.TextButton("Повторить код", on_click=resend_code),
                 ft.TextButton("Войти", on_click=verify_code,
-                              style=ft.ButtonStyle(color=ft.Colors.GREEN_400)),
+                              style=ft.ButtonStyle(color=ACCENT)),
             ]
             code_field.value = ""
             code_field.autofocus = True
@@ -1256,7 +1419,7 @@ def main(page: ft.Page) -> None:
         pending["expires"] = time.time() + CODE_TTL
         PENDING_CODES[phone] = {"code": code, "expires": pending["expires"]}
         code_notice.content.value = (
-            "📱 Демо-режим: реальная SMS не отправляется.\n"
+            "Демо-режим: реальная SMS не отправляется.\n"
             f"Ваш код: {code}"
         )
         set_login_step(2)
@@ -1271,7 +1434,7 @@ def main(page: ft.Page) -> None:
         PENDING_CODES[pending["phone"]] = {"code": code,
                                            "expires": pending["expires"]}
         code_notice.content.value = (
-            "📱 Демо-режим: реальная SMS не отправляется.\n"
+            "Демо-режим: реальная SMS не отправляется.\n"
             f"Новый код: {code}"
         )
         code_field.value = ""
@@ -1298,7 +1461,6 @@ def main(page: ft.Page) -> None:
             error_text.visible = True
             page.update()
             return
-
         phone = pending["phone"]
         name = pending["name"] or f"Пользователь {phone[-4:]}"
         my_name[0] = name
@@ -1321,12 +1483,13 @@ def main(page: ft.Page) -> None:
         apply_layout()
 
         page.pubsub.send_all_on_topic(LOBBY_KEY, {
+            "id": new_msg_id(),
             "user": "Система",
-            "text": f"👋 {name} присоединился к чату",
-            "timestamp": now_time(),
-            "sender_phone": "",
-            "kind": "system",
-            "date": today_iso(),
+            "text": f"{name} присоединился к чату",
+            "timestamp": now_time(), "sender_phone": "",
+            "kind": "system", "date": today_iso(),
+            "reactions": {}, "reply_to_id": "", "reply_to_user": "",
+            "reply_to_text": "",
         })
         announce_hello()
         page.update()
@@ -1355,25 +1518,28 @@ def main(page: ft.Page) -> None:
             return
         announce_bye()
         page.pubsub.send_all_on_topic(LOBBY_KEY, {
+            "id": new_msg_id(),
             "user": "Система",
-            "text": f"👋 {name} покинул чат",
-            "timestamp": now_time(),
-            "sender_phone": "",
-            "kind": "system",
-            "date": today_iso(),
+            "text": f"{name} покинул чат",
+            "timestamp": now_time(), "sender_phone": "",
+            "kind": "system", "date": today_iso(),
+            "reactions": {}, "reply_to_id": "", "reply_to_user": "",
+            "reply_to_text": "",
         })
         PARTICIPANTS.pop(phone, None)
+        core_subscribed[0] = False
         try:
             page.pubsub.unsubscribe_all()
         except Exception:
             pass
-        core_subscribed[0] = False
         my_dm_topics.clear()
         my_phone[0] = None
         my_name[0] = None
         logout_btn.visible = False
         chat_list.controls.clear()
         chats_list.controls.clear()
+        rendered_msg_rows.clear()
+        cancel_reply(update=False)
         update_profile()
         update_online_count()
         show_login()
@@ -1398,12 +1564,7 @@ def main(page: ft.Page) -> None:
     # ============================================================
     # РАСКЛАДКА
     # ============================================================
-    page.add(
-        ft.Row([
-            sidebar_col,
-            chat_pane,
-        ], spacing=0, expand=True)
-    )
+    page.add(ft.Row([sidebar_col, chat_pane], spacing=0, expand=True))
     apply_layout()
 
 

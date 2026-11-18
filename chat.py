@@ -70,7 +70,7 @@ class Message:
     timestamp: str
     type: str = "message"
     target_session_id: str | None = None
-    date: str = ""   # ISO-дата для разделителей
+    date: str = ""
 
 
 # ============================================================
@@ -80,7 +80,7 @@ def main(page: ft.Page) -> None:
     page.title = "Flet Chat"
     page.padding = 0
     page.theme_mode = ft.ThemeMode.DARK
-    page.bgcolor = ft.Colors.GREY_950
+    page.bgcolor = ft.Colors.GREY_900
 
     user_name: list[str | None] = [None]
     my_session_id = page.session.id
@@ -129,7 +129,7 @@ def main(page: ft.Page) -> None:
         gradient=ft.LinearGradient(
             begin=ft.Alignment.TOP_LEFT,
             end=ft.Alignment.BOTTOM_RIGHT,
-            colors=[ft.Colors.GREY_900, ft.Colors.GREY_850],
+            colors=[ft.Colors.GREY_900, ft.Colors.GREY_800],
         ),
         border=ft.border.only(bottom=ft.BorderSide(1, ft.Colors.GREY_800)),
     )
@@ -153,7 +153,7 @@ def main(page: ft.Page) -> None:
         expand=True,
         border_color=ft.Colors.GREY_700,
         focused_border_color=ft.Colors.GREEN_400,
-        bgcolor=ft.Colors.GREY_900,
+        bgcolor=ft.Colors.GREY_800,
         border_radius=24,
         content_padding=ft.padding.symmetric(horizontal=18, vertical=14),
         multiline=True,
@@ -179,7 +179,7 @@ def main(page: ft.Page) -> None:
         options=[ft.dropdown.Option("all", "Всем")],
         value="all",
         text_size=13,
-        bgcolor=ft.Colors.GREY_900,
+        bgcolor=ft.Colors.GREY_800,
         border_color=ft.Colors.GREY_700,
         border_radius=12,
         content_padding=ft.padding.symmetric(horizontal=12, vertical=8),
@@ -235,14 +235,12 @@ def main(page: ft.Page) -> None:
         is_bot = msg.user == BOT_NAME
         is_system = msg.user == "Система"
 
-        # Разделитель дат
         msg_date = msg.date or date.today().isoformat()
         if msg_date != last_rendered_date[0]:
             add_date_separator(msg_date)
             last_rendered_date[0] = msg_date
             last_author[0] = ""
 
-        # Системные сообщения — по центру, тонким шрифтом
         if is_system:
             chat_list.controls.append(
                 ft.Container(
@@ -263,7 +261,6 @@ def main(page: ft.Page) -> None:
             target_name = SESSION_NAMES.get(msg.target_session_id, "?")
             private_mark = f"  🔒 → {target_name}"
 
-        # Группировка: если тот же автор подряд — без шапки
         show_header = last_author[0] != msg.user
         last_author[0] = msg.user
 
@@ -302,7 +299,7 @@ def main(page: ft.Page) -> None:
         row = ft.Row(
             [
                 ft.Container(expand=True),
-                bubble if is_own else ft.Container(),
+                bubble,
                 ft.Container(),
             ] if is_own else [
                 make_avatar(msg.user) if show_header else ft.Container(width=36),
@@ -319,7 +316,6 @@ def main(page: ft.Page) -> None:
     # Приём сообщений
     # ============================================================
     def on_message(msg_data: dict) -> None:
-        # Индикатор «печатает…»
         if msg_data.get("type") == "typing":
             if msg_data["user"] == user_name[0]:
                 return
@@ -332,20 +328,17 @@ def main(page: ft.Page) -> None:
             page.update()
             return
 
-        # Сброс индикатора набора при обычном сообщении
         typing_status.visible = False
 
         msg = Message(**{k: v for k, v in msg_data.items()
                          if k in Message.__dataclass_fields__})
 
-        # Фильтр приватных
         if msg.target_session_id and msg.target_session_id != my_session_id:
             page.update()
             return
 
         add_message_to_ui(msg)
 
-        # Уведомление в title при чужом сообщении
         if msg.user != user_name[0] and msg.user != BOT_NAME:
             unread_count[0] += 1
             page.title = f"({unread_count[0]}) {original_title}"
@@ -369,10 +362,8 @@ def main(page: ft.Page) -> None:
         page.pubsub.send_all(payload)
 
     def handle_bot_command(text: str) -> bool:
-        """Возвращает True, если сообщение обработано ботом."""
         low = text.strip().lower()
 
-        # Приветствие
         if "привет" in low or "hello" in low or "hi" in low.split():
             bot_send(f"Привет, {user_name[0]}! 👋 Напиши /help, чтобы узнать команды.")
             return True
@@ -422,7 +413,6 @@ def main(page: ft.Page) -> None:
         if len(text) > MAX_MSG_LEN:
             text = text[:MAX_MSG_LEN]
 
-        # Бот обрабатывает команды
         if handle_bot_command(text):
             message_input.value = ""
             char_counter.value = f"0/{MAX_MSG_LEN}"
@@ -458,7 +448,6 @@ def main(page: ft.Page) -> None:
 
     message_input.on_submit = send_message
 
-    # ---------- Индикатор набора и счётчик символов ----------
     def on_input_change(e: ft.ControlEvent) -> None:
         val = message_input.value or ""
         char_counter.value = f"{len(val)}/{MAX_MSG_LEN}"
@@ -491,7 +480,7 @@ def main(page: ft.Page) -> None:
         label="Ваше имя", autofocus=True, width=300,
         border_color=ft.Colors.GREEN_400,
         focused_border_color=ft.Colors.GREEN_400,
-        bgcolor=ft.Colors.GREY_900,
+        bgcolor=ft.Colors.GREY_800,
     )
     error_text = ft.Text("", size=12, color=ft.Colors.RED_400, visible=False)
 
@@ -508,7 +497,7 @@ def main(page: ft.Page) -> None:
             error_text,
         ], tight=True, spacing=10),
         actions=[],
-        bgcolor=ft.Colors.GREY_900,
+        bgcolor=ft.Colors.GREY_800,
     )
 
     def update_online() -> None:
@@ -537,7 +526,6 @@ def main(page: ft.Page) -> None:
         SESSION_NAMES[my_session_id] = name
         update_online()
 
-        # Обновляем список получателей
         recipient_dropdown.options = [ft.dropdown.Option("all", "Всем")] + [
             ft.dropdown.Option(n, n) for n in PARTICIPANTS if n != name
         ]
@@ -545,7 +533,6 @@ def main(page: ft.Page) -> None:
 
         page.pop_dialog()
 
-        # История
         for hist_msg in HISTORY:
             add_message_to_ui(Message(**hist_msg))
 
@@ -592,7 +579,6 @@ def main(page: ft.Page) -> None:
             "target_session_id": None,
             "date": date.today().isoformat(),
         })
-        # Снова показываем диалог входа
         name_field.value = ""
         error_text.visible = False
         page.show_dialog(enter_dialog)
@@ -600,7 +586,6 @@ def main(page: ft.Page) -> None:
 
     logout_btn.on_click = do_logout
 
-    # Корректная обработка закрытия вкладки
     def on_disconnect(e=None) -> None:
         name = user_name[0]
         if not name:
@@ -618,7 +603,6 @@ def main(page: ft.Page) -> None:
 
     page.on_disconnect = on_disconnect
 
-    # Сброс счётчика непрочитанных при фокусе
     def on_connect(e=None) -> None:
         unread_count[0] = 0
         page.title = original_title

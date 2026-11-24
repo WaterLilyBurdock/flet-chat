@@ -346,12 +346,12 @@ def main(page: ft.Page) -> None:
     page.theme_mode = ft.ThemeMode.DARK
     page.bgcolor = ft.Colors.GREY_900
 
-    # ---- Состояние страницы ----
-    page.session.set("phone", None)
-    page.session.set("name", None)
-    page.session.set("active_chat", LOBBY_KEY)
-    page.session.set("auth_step", "phone")
-    page.session.set("pending_phone", None)
+    # ---- Состояние страницы (Flet 1.x: session.store) ----
+    page.session.store.set("phone", None)
+    page.session.store.set("name", None)
+    page.session.store.set("active_chat", LOBBY_KEY)
+    page.session.store.set("auth_step", "phone")
+    page.session.store.set("pending_phone", None)
 
     # ---- UI-контейнеры ----
     root = ft.Column(expand=True, spacing=0)
@@ -397,8 +397,8 @@ def main(page: ft.Page) -> None:
                 return
             code = f"{random.randint(0, 999999):06d}"
             PENDING_CODES[phone] = {"code": code, "exp": time.time() + CODE_TTL}
-            page.session.set("pending_phone", phone)
-            page.session.set("auth_step", "code")
+            page.session.store.set("pending_phone", phone)
+            page.session.store.set("auth_step", "code")
             status.value = ""
             info.value = f"Демо-код: {code}"
             phone_field.disabled = True
@@ -408,7 +408,7 @@ def main(page: ft.Page) -> None:
             page.update()
 
         def on_verify(e):
-            phone = page.session.get("pending_phone")
+            phone = page.session.store.get("pending_phone")
             entry = PENDING_CODES.get(phone)
             if not entry or time.time() > entry["exp"]:
                 status.value = "Код истёк. Запросите новый."
@@ -422,8 +422,8 @@ def main(page: ft.Page) -> None:
             del PENDING_CODES[phone]
             name = f"User_{phone[-4:]}"
             PARTICIPANTS[phone] = {"name": name, "phone": phone, "joined": now_time()}
-            page.session.set("phone", phone)
-            page.session.set("name", name)
+            page.session.store.set("phone", phone)
+            page.session.store.set("name", name)
             show_chat()
 
         send_btn.on_click = on_send
@@ -451,8 +451,8 @@ def main(page: ft.Page) -> None:
 
     # ---- Чат ----
     def build_chat_view():
-        phone = page.session.get("phone")
-        my_name = page.session.get("name") or "User"
+        phone = page.session.store.get("phone")
+        my_name = page.session.store.get("name") or "User"
 
         # --- Сайдбар ---
         contacts_col = ft.Column(spacing=4, scroll=ft.ScrollMode.AUTO)
@@ -481,7 +481,7 @@ def main(page: ft.Page) -> None:
                 ], spacing=8),
                 padding=ft.padding.symmetric(horizontal=8, vertical=10),
                 border_radius=8,
-                bgcolor=ft.Colors.with_opacity(0.15, ACCENT) if page.session.get("active_chat") == LOBBY_KEY else None,
+                bgcolor=ft.Colors.with_opacity(0.15, ACCENT) if page.session.store.get("active_chat") == LOBBY_KEY else None,
                 on_click=lambda e: switch_chat(LOBBY_KEY),
             )
             contacts_col.controls.append(lobby_btn)
@@ -494,7 +494,7 @@ def main(page: ft.Page) -> None:
                 ], spacing=8),
                 padding=ft.padding.symmetric(horizontal=8, vertical=10),
                 border_radius=8,
-                bgcolor=ft.Colors.with_opacity(0.15, SUPPORT_CLR) if page.session.get("active_chat") == SUPPORT_KEY else None,
+                bgcolor=ft.Colors.with_opacity(0.15, SUPPORT_CLR) if page.session.store.get("active_chat") == SUPPORT_KEY else None,
                 on_click=lambda e: switch_chat(SUPPORT_KEY),
             )
             contacts_col.controls.append(support_btn)
@@ -505,7 +505,7 @@ def main(page: ft.Page) -> None:
                 contacts_col.controls.append(ft.Text("Контакты", size=11, color=ft.Colors.GREY_500))
             for p, d in others:
                 topic = dm_topic(phone, p)
-                is_active = page.session.get("active_chat") == topic
+                is_active = page.session.store.get("active_chat") == topic
                 avatar = ft.CircleAvatar(
                     content=ft.Text(get_initials(d["name"]), size=11, color=ft.Colors.WHITE),
                     bgcolor=get_user_color(p),
@@ -607,7 +607,7 @@ def main(page: ft.Page) -> None:
             render_messages()
 
         def render_messages():
-            key = page.session.get("active_chat")
+            key = page.session.store.get("active_chat")
             hist = get_history(key)
             messages_list.controls.clear()
 
@@ -655,7 +655,6 @@ def main(page: ft.Page) -> None:
 
                 # Обычное сообщение
                 bubble_color = ft.Colors.BLUE_800 if is_mine else ft.Colors.GREY_800
-                align = ft.MainAxisAlignment.END if is_mine else ft.MainAxisAlignment.START
 
                 avatar = ft.CircleAvatar(
                     content=ft.Text(get_initials(user_name), size=11, color=ft.Colors.WHITE),
@@ -708,8 +707,8 @@ def main(page: ft.Page) -> None:
             text = text.strip()
             if not text:
                 return
-            key = page.session.get("active_chat")
-            my_name = page.session.get("name") or "User"
+            key = page.session.store.get("active_chat")
+            my_name = page.session.store.get("name") or "User"
 
             # Команды
             if text.startswith("/"):
@@ -826,7 +825,7 @@ def main(page: ft.Page) -> None:
                 else:
                     new_name = arg.strip()[:32]
                     PARTICIPANTS[phone]["name"] = new_name
-                    page.session.set("name", new_name)
+                    page.session.store.set("name", new_name)
                     add_message(key, BOT_NAME, f"Имя изменено на **{new_name}**.", kind="message")
                     refresh_contacts()
             elif cmd == "/me":
@@ -853,7 +852,7 @@ def main(page: ft.Page) -> None:
 
         # ---- Переключение чата ----
         def switch_chat(key: str):
-            page.session.set("active_chat", key)
+            page.session.store.set("active_chat", key)
             if key == LOBBY_KEY:
                 chat_title.value = "Общий чат"
                 back_btn.visible = False
@@ -866,8 +865,6 @@ def main(page: ft.Page) -> None:
                     add_message(key, SUPPORT_NAME, SUPPORT_GREETING, kind="message")
             else:
                 # DM
-                other_phone = key.split(":")[1].replace(phone, "").lstrip("_")
-                # Извлекаем имя
                 other_name = "Чат"
                 for p, d in PARTICIPANTS.items():
                     if p != phone:
@@ -879,12 +876,12 @@ def main(page: ft.Page) -> None:
             render_messages()
 
         def do_logout():
-            p = page.session.get("phone")
+            p = page.session.store.get("phone")
             if p:
                 PARTICIPANTS.pop(p, None)
-            page.session.set("phone", None)
-            page.session.set("name", None)
-            page.session.set("active_chat", LOBBY_KEY)
+            page.session.store.set("phone", None)
+            page.session.store.set("name", None)
+            page.session.store.set("active_chat", LOBBY_KEY)
             show_login()
 
         # ---- Инициализация ----
@@ -895,7 +892,7 @@ def main(page: ft.Page) -> None:
         return ft.Container(content=main_row, expand=True, padding=0)
 
     # ---- Старт ----
-    phone = page.session.get("phone")
+    phone = page.session.store.get("phone")
     if phone:
         show_chat()
     else:

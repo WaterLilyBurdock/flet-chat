@@ -59,8 +59,6 @@ SUPPORT_KEY = "support"
 # ============================================================
 # НАСТРОЙКИ ИИ-АГЕНТА (GigaChat)
 # ============================================================
-# Authorization Key из личного кабинета GigaChat (Studio)
-# НЕ Client Secret! Authorization Key = Base64(Client ID:Client Secret)
 GIGACHAT_AUTH_KEY = os.environ.get("GIGACHAT_AUTH_KEY", "")
 
 GIGACHAT_AUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
@@ -385,8 +383,8 @@ def main(page: ft.Page) -> None:
         )
         status = ft.Text("", color=ft.Colors.RED_400, size=13)
         info = ft.Text("", color=ft.Colors.GREY_400, size=12)
-        send_btn = ft.ElevatedButton("Получить код", width=320)
-        verify_btn = ft.ElevatedButton("Войти", width=320, visible=False)
+        send_btn = ft.Button("Получить код", width=320)
+        verify_btn = ft.Button("Войти", width=320, visible=False)
 
         def on_send(e):
             raw = phone_field.value or ""
@@ -678,7 +676,7 @@ def main(page: ft.Page) -> None:
                     quick_row = ft.Row(spacing=4, wrap=True)
                     for q in m["quick"]:
                         quick_row.controls.append(
-                            ft.ElevatedButton(q, height=28, style=ft.ButtonStyle(
+                            ft.Button(q, height=28, style=ft.ButtonStyle(
                                 padding=ft.padding.symmetric(horizontal=8, vertical=0),
                                 text_style=ft.TextStyle(size=11),
                             ), on_click=lambda e, txt=q: send_text(txt))

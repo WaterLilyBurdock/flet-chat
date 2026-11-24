@@ -443,7 +443,7 @@ def main(page: ft.Page) -> None:
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=12,
             ),
-            alignment=ft.alignment.center,
+            alignment=ft.Alignment.CENTER,
             expand=True,
         )
 
@@ -618,7 +618,7 @@ def main(page: ft.Page) -> None:
                     messages_list.controls.append(
                         ft.Container(
                             content=ft.Text(label, size=11, color=ft.Colors.GREY_500, text_align=ft.TextAlign.CENTER),
-                            alignment=ft.alignment.center,
+                            alignment=ft.Alignment.CENTER,
                             padding=ft.padding.symmetric(vertical=4),
                         )
                     )
@@ -633,7 +633,7 @@ def main(page: ft.Page) -> None:
                         ft.Container(
                             content=ft.Text(text, size=11, color=ft.Colors.GREY_500,
                                             text_align=ft.TextAlign.CENTER, italic=True),
-                            alignment=ft.alignment.center,
+                            alignment=ft.Alignment.CENTER,
                             padding=ft.padding.symmetric(vertical=2),
                         )
                     )
@@ -645,7 +645,7 @@ def main(page: ft.Page) -> None:
                             content=ft.Text(f"* {user_name} {text}", size=12,
                                             color=ft.Colors.GREY_400, italic=True,
                                             text_align=ft.TextAlign.CENTER),
-                            alignment=ft.alignment.center,
+                            alignment=ft.Alignment.CENTER,
                             padding=ft.padding.symmetric(vertical=2),
                         )
                     )

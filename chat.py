@@ -467,7 +467,7 @@ def main(page: ft.Page) -> None:
             width=220,
             bgcolor=GREY_850,
             padding=12,
-            border_radius=ft.border_radius.only(top_right=12, bottom_right=12),
+            border_radius=ft.BorderRadius.only(top_right=12, bottom_right=12),
         )
 
         def refresh_contacts():
@@ -478,7 +478,7 @@ def main(page: ft.Page) -> None:
                     ft.Icon(ft.Icons.GROUP, color=ACCENT, size=20),
                     ft.Text("Общий чат", size=14, color=ft.Colors.WHITE),
                 ], spacing=8),
-                padding=ft.padding.symmetric(horizontal=8, vertical=10),
+                padding=ft.Padding.symmetric(horizontal=8, vertical=10),
                 border_radius=8,
                 bgcolor=ft.Colors.with_opacity(0.15, ACCENT) if page.session.store.get("active_chat") == LOBBY_KEY else None,
                 on_click=lambda e: switch_chat(LOBBY_KEY),
@@ -491,7 +491,7 @@ def main(page: ft.Page) -> None:
                     ft.Icon(ft.Icons.SUPPORT_AGENT, color=SUPPORT_CLR, size=20),
                     ft.Text(SUPPORT_NAME, size=14, color=ft.Colors.WHITE),
                 ], spacing=8),
-                padding=ft.padding.symmetric(horizontal=8, vertical=10),
+                padding=ft.Padding.symmetric(horizontal=8, vertical=10),
                 border_radius=8,
                 bgcolor=ft.Colors.with_opacity(0.15, SUPPORT_CLR) if page.session.store.get("active_chat") == SUPPORT_KEY else None,
                 on_click=lambda e: switch_chat(SUPPORT_KEY),
@@ -518,7 +518,7 @@ def main(page: ft.Page) -> None:
                             ft.Text(d.get("joined", ""), size=10, color=ft.Colors.GREY_500),
                         ], spacing=0),
                     ], spacing=8),
-                    padding=ft.padding.symmetric(horizontal=8, vertical=6),
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=6),
                     border_radius=8,
                     bgcolor=ft.Colors.with_opacity(0.12, ACCENT) if is_active else None,
                     on_click=lambda e, t=topic: switch_chat(t),
@@ -530,7 +530,7 @@ def main(page: ft.Page) -> None:
         messages_list = ft.ListView(
             expand=True,
             spacing=6,
-            padding=ft.padding.symmetric(horizontal=12, vertical=8),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
             auto_scroll=True,
         )
 
@@ -565,16 +565,16 @@ def main(page: ft.Page) -> None:
                 ft.Container(expand=True),
                 logout_btn,
             ], spacing=4),
-            padding=ft.padding.symmetric(horizontal=12, vertical=8),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
             bgcolor=GREY_850,
-            border_radius=ft.border_radius.only(top_left=12, top_right=12),
+            border_radius=ft.BorderRadius.only(top_left=12, top_right=12),
         )
 
         # --- Основная область ---
         chat_area = ft.Column(
             [header, messages_list, ft.Container(
                 content=ft.Row([input_field, send_btn], spacing=6),
-                padding=ft.padding.symmetric(horizontal=12, vertical=8),
+                padding=ft.Padding.symmetric(horizontal=12, vertical=8),
                 bgcolor=GREY_850,
             )],
             expand=True,
@@ -620,7 +620,7 @@ def main(page: ft.Page) -> None:
                         ft.Container(
                             content=ft.Text(label, size=11, color=ft.Colors.GREY_500, text_align=ft.TextAlign.CENTER),
                             alignment=ft.Alignment.CENTER,
-                            padding=ft.padding.symmetric(vertical=4),
+                            padding=ft.Padding.symmetric(vertical=4),
                         )
                     )
 
@@ -635,7 +635,7 @@ def main(page: ft.Page) -> None:
                             content=ft.Text(text, size=11, color=ft.Colors.GREY_500,
                                             text_align=ft.TextAlign.CENTER, italic=True),
                             alignment=ft.Alignment.CENTER,
-                            padding=ft.padding.symmetric(vertical=2),
+                            padding=ft.Padding.symmetric(vertical=2),
                         )
                     )
                     continue
@@ -647,7 +647,7 @@ def main(page: ft.Page) -> None:
                                             color=ft.Colors.GREY_400, italic=True,
                                             text_align=ft.TextAlign.CENTER),
                             alignment=ft.Alignment.CENTER,
-                            padding=ft.padding.symmetric(vertical=2),
+                            padding=ft.Padding.symmetric(vertical=2),
                         )
                     )
                     continue
@@ -678,7 +678,7 @@ def main(page: ft.Page) -> None:
                     for q in m["quick"]:
                         quick_row.controls.append(
                             ft.Button(q, height=28, style=ft.ButtonStyle(
-                                padding=ft.padding.symmetric(horizontal=8, vertical=0),
+                                padding=ft.Padding.symmetric(horizontal=8, vertical=0),
                                 text_style=ft.TextStyle(size=11),
                             ), on_click=lambda e, txt=q: send_text(txt))
                         )
@@ -687,7 +687,7 @@ def main(page: ft.Page) -> None:
                 bubble = ft.Container(
                     content=ft.Column(bubble_content, spacing=2, tight=True),
                     bgcolor=bubble_color,
-                    padding=ft.padding.symmetric(horizontal=10, vertical=6),
+                    padding=ft.Padding.symmetric(horizontal=10, vertical=6),
                     border_radius=12,
                     width=280,
                 )

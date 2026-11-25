@@ -28,6 +28,7 @@ ACCENT_MED = ft.Colors.BLUE_600
 ACCENT_DEEP = ft.Colors.BLUE_700
 ONLINE_CLR = ft.Colors.GREEN_400
 SUPPORT_CLR = ft.Colors.CYAN_400
+GREY_850 = ft.Colors.GREY_800  # алиас, т.к. GREY_850 нет в Flet 1.x
 
 # ============================================================
 # ГЛОБАЛЬНОЕ СОСТОЯНИЕ
@@ -344,7 +345,7 @@ def main(page: ft.Page) -> None:
     page.theme_mode = ft.ThemeMode.DARK
     page.bgcolor = ft.Colors.GREY_900
 
-    # ---- Состояние страницы (Flet 1.x: session.store) ----
+    # ---- Состояние страницы ----
     page.session.store.set("phone", None)
     page.session.store.set("name", None)
     page.session.store.set("active_chat", LOBBY_KEY)
@@ -464,7 +465,7 @@ def main(page: ft.Page) -> None:
                 spacing=6,
             ),
             width=220,
-            bgcolor=ft.Colors.GREY_850,
+            bgcolor=GREY_850,
             padding=12,
             border_radius=ft.border_radius.only(top_right=12, bottom_right=12),
         )
@@ -565,7 +566,7 @@ def main(page: ft.Page) -> None:
                 logout_btn,
             ], spacing=4),
             padding=ft.padding.symmetric(horizontal=12, vertical=8),
-            bgcolor=ft.Colors.GREY_850,
+            bgcolor=GREY_850,
             border_radius=ft.border_radius.only(top_left=12, top_right=12),
         )
 
@@ -574,7 +575,7 @@ def main(page: ft.Page) -> None:
             [header, messages_list, ft.Container(
                 content=ft.Row([input_field, send_btn], spacing=6),
                 padding=ft.padding.symmetric(horizontal=12, vertical=8),
-                bgcolor=ft.Colors.GREY_850,
+                bgcolor=GREY_850,
             )],
             expand=True,
             spacing=0,
